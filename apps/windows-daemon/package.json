@@ -1,0 +1,9 @@
+{
+  "name": "windows-daemon",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "cargo run",
+    "build": "cargo build --release",
+    "lint": "cargo clippy"
+  }
+}
