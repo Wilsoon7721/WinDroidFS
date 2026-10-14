@@ -1,0 +1,11 @@
+{
+    "name": "android-host",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "build": "gradlew assembleDebug",
+        "dev": "gradlew installDebug",
+        "lint": "gradlew lint",
+        "clean": "gradlew clean"
+    }
+}
