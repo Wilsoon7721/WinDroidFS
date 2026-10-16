@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package windroid;
+option java_package = "dev.wilsoon.windroidfs.protocol";
+option java_outer_classname = "WinDroidProto";
+
+message Packet {
+  oneof payload {
+    Ping ping = 1;
+    Pong pong = 2;
+    DirectoryRequest dir_request = 3;
+    DirectoryResponse dir_response = 4;
+  }
+}
+
+// Connection Testing
+message Ping {
+  int64 timestamp_ms = 1;
+}
+
+message Pong {
+  int64 timestamp_ms = 1;
+}
+
+// File System Commands
+message DirectoryRequest {
+  string path = 1;
+}
+
+message DirectoryResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated FileInfo files = 3;  
+}
+
+message FileInfo {
+  string name = 1;
+  int64 size_bytes = 2;
+  bool is_directory = 3;
+  int64 last_modified_ms = 4;
+}
