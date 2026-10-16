@@ -14,6 +14,10 @@ const STRING_VERSION: u16 = 3;
 const STRING_URI: u16 = 4;
 const STRING_SERIAL: u16 = 5;
 
+pub mod windroid {
+    include!(concat!(env!("OUT_DIR"), "/windroid.rs"));
+}
+
 fn main() -> rusb::Result<()> {
     let context = Context::new()?;
     let devices = context.devices()?;
