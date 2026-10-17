@@ -1,61 +1,159 @@
-use rusb::{Context, Device, DeviceHandle, Direction, Recipient, RequestType, UsbContext};
-use std::time::Duration;
+use prost::Message;
+use rusb::{
+    Context, Device, DeviceHandle, Direction, Recipient, RequestType, TransferType, UsbContext,
+};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// AOA Protocol Constants
+// 1. Include the generated Protobuf code!
+pub mod windroid {
+    include!(concat!(env!("OUT_DIR"), "/windroid.rs"));
+}
+use windroid::{Packet, Ping, packet::Payload};
+
 const AOA_GET_PROTOCOL: u8 = 51;
 const AOA_SEND_STRING: u8 = 52;
 const AOA_START: u8 = 53;
 
-// AOA String IDs
-const STRING_MANUFACTURER: u16 = 0;
-const STRING_MODEL: u16 = 1;
-const STRING_DESCRIPTION: u16 = 2;
-const STRING_VERSION: u16 = 3;
-const STRING_URI: u16 = 4;
-const STRING_SERIAL: u16 = 5;
-
-pub mod windroid {
-    include!(concat!(env!("OUT_DIR"), "/windroid.rs"));
-}
+// 2. A list of standard Android Manufacturer Vendor IDs
+const ANDROID_VIDS: &[u16] = &[
+    0x04e8, // Samsung
+    0x18d1, // Google / Nexus / Pixel
+    0x22d9, // OnePlus / Oppo
+    0x2717, // Xiaomi
+    0x1004, // LG
+    0x0fce, // Sony
+    0x22b8, // Motorola
+    0x2a70, // OnePlus
+];
 
 fn main() -> rusb::Result<()> {
     let context = Context::new()?;
-    let devices = context.devices()?;
 
-    // 1. Find the specific Samsung device
-    let mut target_device: Option<Device<Context>> = None;
-    for device in devices.iter() {
-        let desc = device.device_descriptor()?;
-        if desc.vendor_id() == 0x04e8 && desc.product_id() == 0x6860 {
-            target_device = Some(device);
-            break;
+    println!("Scanning for an Android device...");
+
+    // Find Android phone and push it into AOA mode
+    if let Some(device) = find_android_device(&context)? {
+        println!("Found Android device. Sending AOA Handshake...");
+        if send_aoa_handshake(&device)? {
+            println!("Handshake successful. Waiting for phone to reconnect in Accessory Mode...");
         }
+    } else {
+        println!("No Android devices found (or it's already in Accessory Mode).");
     }
 
-    // Rust's match statement unwraps the Option.
-    // If target_device is None, we exit gracefully.
-    let device = match target_device {
-        Some(dev) => dev,
-        None => {
-            println!("Phone not found. Is it plugged in?");
-            return Ok(());
+    sleep(Duration::from_secs(2));
+
+    // Find accessory mode device
+    if let Some(mut handle) = find_and_open_aoa_device(&context)? {
+        println!("Accessory Mode device found and opened!");
+
+        // We must claim the USB interface before we can send raw data
+        let interface_num = 0;
+        handle.claim_interface(interface_num)?;
+
+        // Find the bulk endpoints (we need the OUT endpoint to send data to the phone)
+        let bulk_out_ep = find_bulk_out_endpoint(&handle.device(), interface_num)?;
+
+        println!(
+            "Pipe established on Endpoint 0x{:02x}. Creating Protobuf Ping...",
+            bulk_out_ep
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let ping_msg = Ping { timestamp_ms: now };
+
+        let packet = Packet {
+            payload: Some(Payload::Ping(ping_msg)),
+        };
+
+        let mut byte_buffer = Vec::new();
+        packet.encode(&mut byte_buffer).unwrap();
+
+        let timeout = Duration::from_secs(15);
+        println!("Waiting up to 15 seconds for the Android app to open and accept the data...");
+
+        match handle.write_bulk(bulk_out_ep, &byte_buffer, timeout) {
+            Ok(bytes_written) => println!(
+                "✅ Success! Sent {} bytes of Protobuf data to the phone.",
+                bytes_written
+            ),
+            Err(e) => println!("❌ Failed to write to bulk endpoint: {:?}", e),
+        }
+
+        handle.release_interface(interface_num)?;
+    } else {
+        println!("Accessory Mode device not found. Did the phone prompt get dismissed?");
+    }
+
+    Ok(())
+}
+
+fn find_android_device(context: &Context) -> rusb::Result<Option<Device<Context>>> {
+    let devices = context.devices()?;
+    for device in devices.iter() {
+        let desc = device.device_descriptor()?;
+        if ANDROID_VIDS.contains(&desc.vendor_id())
+            && desc.product_id() != 0x2d00
+            && desc.product_id() != 0x2d01
+        {
+            return Ok(Some(device));
+        }
+    }
+    Ok(None)
+}
+
+fn find_and_open_aoa_device(context: &Context) -> rusb::Result<Option<DeviceHandle<Context>>> {
+    let devices = context.devices()?;
+    for device in devices.iter() {
+        let desc = device.device_descriptor()?;
+        // 0x18D1 is Google, 0x2D00 and 0x2D01 are AOA product IDs
+        if desc.vendor_id() == 0x18d1
+            && (desc.product_id() == 0x2d00 || desc.product_id() == 0x2d01)
+        {
+            match device.open() {
+                Ok(handle) => return Ok(Some(handle)),
+                Err(rusb::Error::Access) | Err(rusb::Error::NotSupported) => {
+                    println!("❌ Access Denied to Accessory Mode device!");
+                    println!(
+                        "   -> The phone successfully switched to Accessory Mode, but Windows is blocking the new connection."
+                    );
+                    println!(
+                        "   -> Open Zadig NOW, find the Android Accessory (VID 18D1), and install WinUSB."
+                    );
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn send_aoa_handshake(device: &Device<Context>) -> rusb::Result<bool> {
+    let handle = match device.open() {
+        Ok(h) => h,
+        Err(rusb::Error::Access) | Err(rusb::Error::NotSupported) => {
+            println!(
+                "❌ Access Denied: Windows is protecting this device with a proprietary driver (e.g., MTP/Samsung)."
+            );
+            println!("   -> Please use Zadig to temporarily swap the driver to WinUSB.");
+            return Ok(false);
+        }
+        Err(e) => {
+            println!("❌ Hardware Error while opening device: {:?}", e);
+            return Ok(false);
         }
     };
 
-    println!("Found Samsung phone. Attempting AOA Handshake...");
-
-    // 2. Open the device to get a handle
-    let handle = device
-        .open()
-        .expect("FAILED AT: device.open(). Is Windows blocking raw access?");
     let timeout = Duration::from_secs(1);
-
-    // 3. Request 51: Get Protocol
-    // We expect the phone to write exactly 2 bytes (a 16-bit integer) back into our buffer.
     let mut protocol_buffer = [0u8; 2];
     let req_type_in = rusb::request_type(Direction::In, RequestType::Vendor, Recipient::Device);
 
-    let bytes_read = handle
+    if handle
         .read_control(
             req_type_in,
             AOA_GET_PROTOCOL,
@@ -64,57 +162,55 @@ fn main() -> rusb::Result<()> {
             &mut protocol_buffer,
             timeout,
         )
-        .expect("FAILED AT: read_control()");
-
-    if bytes_read == 2 {
-        // Convert the 2 raw bytes into a Rust u16 integer (Little Endian format)
+        .is_ok()
+    {
         let protocol_version = u16::from_le_bytes(protocol_buffer);
-        println!("Device supports AOA Protocol Version: {}", protocol_version);
-
         if protocol_version >= 1 {
-            // 4. Request 52: Send Identity Strings
-            send_string(&handle, STRING_MANUFACTURER, "Wilson Oon")?;
-            send_string(&handle, STRING_MODEL, "WinDroidFS")?;
-            send_string(&handle, STRING_DESCRIPTION, "High-Speed USB File System")?;
-            send_string(&handle, STRING_VERSION, "1.0")?;
-            send_string(&handle, STRING_URI, "https://windroid.wilsoon.dev")?;
-            send_string(&handle, STRING_SERIAL, "WD-001")?;
+            send_string(&handle, 0, "Wilson Oon")?;
+            send_string(&handle, 1, "WinDroidFS")?;
+            send_string(&handle, 2, "High-Speed USB File System")?;
+            send_string(&handle, 3, "1.0")?;
+            send_string(&handle, 4, "https://wilsoon.dev")?;
+            send_string(&handle, 5, "WD-001")?;
 
-            // 5. Request 53: Start Accessory Mode
-            // This defines a request in the OUT direction (computer -> phone), the request type is manufacturer-specfic (Vendor), and the Recipient is the entire device itself
             let req_type_out =
                 rusb::request_type(Direction::Out, RequestType::Vendor, Recipient::Device);
-
-            println!("Sending Start command...");
             handle.write_control(req_type_out, AOA_START, 0, 0, &[], timeout)?;
-
-            println!(
-                "Handshake sent! The phone should now disconnect and reconnect in Accessory Mode."
-            );
+            return Ok(true);
         }
-    } else {
-        println!("Failed to read protocol version.");
     }
-
-    Ok(())
+    Ok(false)
 }
 
-// A helper function to send strings
 fn send_string(handle: &DeviceHandle<Context>, index: u16, string: &str) -> rusb::Result<()> {
     let req_type_out = rusb::request_type(Direction::Out, RequestType::Vendor, Recipient::Device);
-    let timeout = Duration::from_secs(1);
-
-    // We convert the Rust string to bytes, and add a null terminator (\0)
     let mut data = String::from(string);
     data.push('\0');
-
     handle.write_control(
         req_type_out,
-        AOA_SEND_STRING,
+        52,
         0,
         index,
         data.as_bytes(),
-        timeout,
+        Duration::from_secs(1),
     )?;
     Ok(())
+}
+
+fn find_bulk_out_endpoint(device: &Device<Context>, interface_num: u8) -> rusb::Result<u8> {
+    let config_desc = device.active_config_descriptor()?;
+    for interface in config_desc.interfaces() {
+        if interface.number() == interface_num {
+            for interface_desc in interface.descriptors() {
+                for endpoint_desc in interface_desc.endpoint_descriptors() {
+                    if endpoint_desc.transfer_type() == TransferType::Bulk
+                        && endpoint_desc.direction() == Direction::Out
+                    {
+                        return Ok(endpoint_desc.address());
+                    }
+                }
+            }
+        }
+    }
+    Err(rusb::Error::NotFound)
 }
