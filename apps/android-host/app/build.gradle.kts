@@ -7,6 +7,11 @@ plugins {
 
 android {
     namespace = "dev.wilsoon.windroidfs"
+
+    installation {
+        installOptions.addAll(listOf("--user", "0"))
+    }
+
     compileSdk {
         version = release(36)
     }
