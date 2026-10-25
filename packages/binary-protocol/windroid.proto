@@ -10,6 +10,8 @@ message Packet {
     Pong pong = 2;
     DirectoryRequest dir_request = 3;
     DirectoryResponse dir_response = 4;
+    FileReadRequest file_req = 5;
+    FileReadResponse file_res = 6;
   }
 }
 
@@ -38,4 +40,18 @@ message FileInfo {
   int64 size_bytes = 2;
   bool is_directory = 3;
   int64 last_modified_ms = 4;
+}
+
+message FileReadRequest {
+  string path = 1;  
+  int64 offset = 2;
+  int32 max_bytes = 3; // max bytes to read
+}
+
+message FileReadResponse {
+  bool success = 1;
+  string error_message = 2;
+  bytes data = 3;       // raw file bytes
+  int64 total_file_size = 4;
+  bool eof = 5;
 }

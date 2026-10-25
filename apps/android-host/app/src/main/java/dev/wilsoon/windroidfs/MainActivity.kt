@@ -30,6 +30,7 @@ enum class AppScreen {
 }
 
 private const val ACTION_USB_PERMISSION = "dev.wilsoon.windroidfs.USB_PERMISSION"
+
 class MainActivity : ComponentActivity() {
     private var fileDescriptor: ParcelFileDescriptor? = null
     private var inputStream: FileInputStream? = null
@@ -84,7 +85,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun listenForPackets() {
-        val buffer = ByteArray(16384) // 16KB buffer
+        val buffer = ByteArray(16384)
 
         while (isConnected && inputStream != null) {
             try {
@@ -95,13 +96,109 @@ class MainActivity : ComponentActivity() {
                     val packet = WinDroidProto.Packet.parseFrom(packetData)
 
                     if (packet.hasPing()) {
-                        Log.d("WinDroid", "✅ RECEIVED PING FROM RUST! Timestamp: ${packet.ping.timestampMs}")
+                        val pingTimestamp = packet.ping.timestampMs
+                        android.util.Log.d("WinDroid", "✅ RECEIVED PING! Timestamp: $pingTimestamp")
 
-                        // TODO: Send a Pong back!
+                        val pongMsg = WinDroidProto.Pong.newBuilder()
+                            .setTimestampMs(pingTimestamp)
+                            .build()
+
+                        val responsePacket = WinDroidProto.Packet.newBuilder()
+                            .setPong(pongMsg)
+                            .build()
+
+                        val responseBytes = responsePacket.toByteArray()
+                        outputStream?.write(responseBytes)
+                        outputStream?.flush()
+                    }
+
+                    if (packet.hasDirRequest()) {
+                        val requestedPath = packet.dirRequest.path
+                        android.util.Log.d("WinDroid", "PC requested directory: $requestedPath")
+
+                        val rootStorage = Environment.getExternalStorageDirectory().absolutePath
+
+                        val targetPath = if (requestedPath == "/") rootStorage else "$rootStorage$requestedPath"
+                        val targetDir = java.io.File(targetPath)
+
+                        val responseBuilder = WinDroidProto.DirectoryResponse.newBuilder()
+
+                        if (targetDir.exists() && targetDir.isDirectory) {
+                            responseBuilder.success = true
+
+                            val files = targetDir.listFiles()
+                            if (files != null) {
+                                for (file in files) {
+                                    val fileInfo = WinDroidProto.FileInfo.newBuilder()
+                                        .setName(file.name)
+                                        .setSizeBytes(if (file.isDirectory) 0 else file.length())
+                                        .setIsDirectory(file.isDirectory)
+                                        .setLastModifiedMs(file.lastModified())
+                                        .build()
+
+                                    responseBuilder.addFiles(fileInfo)
+                                }
+                            }
+                        } else {
+                            responseBuilder.success = false
+                            responseBuilder.errorMessage = "Path does not exist or is not a directory"
+                        }
+
+                        val responsePacket = WinDroidProto.Packet.newBuilder().setDirResponse(responseBuilder).build()
+
+                        val responseBytes = responsePacket.toByteArray()
+                        outputStream?.write(responseBytes)
+                        outputStream?.flush()
+                    }
+
+                    if (packet.hasFileReq()) {
+                        val req = packet.fileReq
+
+                        val rootStorage = Environment.getExternalStorageDirectory().absolutePath
+                        val targetPath = if (req.path == "/") rootStorage else "$rootStorage${req.path}"
+                        val targetFile = java.io.File(targetPath)
+
+                        val responseBuilder = WinDroidProto.FileReadResponse.newBuilder()
+
+                        if (targetFile.exists() && targetFile.isFile) {
+                            try {
+                                val raf = java.io.RandomAccessFile(targetFile, "r")
+                                raf.seek(req.offset)
+
+                                val chunk = ByteArray(req.maxBytes)
+                                val bytesRead = raf.read(chunk)
+
+                                responseBuilder.success = true
+                                responseBuilder.totalFileSize = targetFile.length()
+
+                                if (bytesRead > 0) {
+                                    responseBuilder.data = com.google.protobuf.ByteString.copyFrom(chunk, 0, bytesRead)
+                                    responseBuilder.eof = (req.offset + bytesRead) >= targetFile.length()
+                                } else {
+                                    responseBuilder.data = com.google.protobuf.ByteString.EMPTY
+                                    responseBuilder.eof = true
+                                }
+                                raf.close()
+
+                            } catch (e: Exception) {
+                                responseBuilder.success = false
+                                responseBuilder.errorMessage = e.message ?: "Unknown read error"
+                            }
+                        } else {
+                            responseBuilder.success = false
+                            responseBuilder.errorMessage = "File not found or is a directory"
+                        }
+
+                        val responsePacket = WinDroidProto.Packet.newBuilder()
+                            .setFileRes(responseBuilder)
+                            .build()
+
+                        outputStream?.write(responsePacket.toByteArray())
+                        outputStream?.flush()
                     }
                 }
             } catch (e: Exception) {
-                Log.e("WinDroid", "Stream read error or disconnected: ${e.message}")
+                android.util.Log.e("WinDroid", "Stream read error or disconnected: ${e.message}")
                 isConnected = false
                 break
             }
@@ -247,7 +344,12 @@ class MainActivity : ComponentActivity() {
                     val intent = Intent(ACTION_USB_PERMISSION).apply {
                         setPackage(packageName)
                     }
-                    val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                    val permissionIntent = PendingIntent.getBroadcast(
+                        this,
+                        0,
+                        intent,
+                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
                     usbManager.requestPermission(accessory, permissionIntent)
                 }
             }
