@@ -4,7 +4,12 @@ package windroid;
 option java_package = "dev.wilsoon.windroidfs.protocol";
 option java_outer_classname = "WinDroidProto";
 
+// Every message on the USB link is one Packet, framed by frame.rs / Framing.kt.
+// Both copies of this file must stay identical.
 message Packet {
+  // Set by the PC, echoed in the reply, so a late reply isn't mistaken for the next one's.
+  uint32 request_id = 15;
+
   oneof payload {
     Ping ping = 1;
     Pong pong = 2;
@@ -12,16 +17,61 @@ message Packet {
     DirectoryResponse dir_response = 4;
     FileReadRequest file_req = 5;
     FileReadResponse file_res = 6;
+    StatRequest stat_request = 7;
+    StatResponse stat_response = 8;
+    VolumeInfoRequest volume_request = 9;
+    VolumeInfoResponse volume_response = 10;
+
+    // Writing, all answered with an OperationResponse. (15 is request_id's.)
+    CreateRequest create_request = 11;
+    WriteRequest write_request = 12;
+    TruncateRequest truncate_request = 13;
+    DeleteRequest delete_request = 14;
+    RenameRequest rename_request = 16;
+    SetTimesRequest set_times_request = 17;
+    FlushRequest flush_request = 18;
+    OperationResponse op_response = 19;
+
+    // The PC is disconnecting on purpose. The phone echoes it and ends the link.
+    Goodbye goodbye = 20;
   }
 }
+
+// Why a request failed. The PC maps these to Windows errors.
+enum ErrorCode {
+  OK = 0;
+  NOT_FOUND = 1;
+  ACCESS_DENIED = 2;
+  NOT_A_DIRECTORY = 3;
+  IS_A_DIRECTORY = 4;
+  INVALID_REQUEST = 5;
+  IO_ERROR = 6;
+  ALREADY_EXISTS = 7;
+  DIRECTORY_NOT_EMPTY = 8;
+  NO_SPACE = 9;
+}
+
+message Goodbye {}
 
 // Connection Testing
 message Ping {
   int64 timestamp_ms = 1;
+  string host_name = 2;
+  UsbSpeed usb_speed = 3;  // only the PC can see this
+}
+
+enum UsbSpeed {
+  USB_SPEED_UNKNOWN = 0;
+  USB_SPEED_LOW = 1;         // USB 1.0, 1.5 Mbit/s
+  USB_SPEED_FULL = 2;        // USB 1.1, 12 Mbit/s
+  USB_SPEED_HIGH = 3;        // USB 2.0, 480 Mbit/s
+  USB_SPEED_SUPER = 4;       // USB 3.0, 5 Gbit/s
+  USB_SPEED_SUPER_PLUS = 5;  // USB 3.1 and later, 10 Gbit/s or more
 }
 
 message Pong {
   int64 timestamp_ms = 1;
+  string device_name = 2;  // e.g. "Wilson's S25+"
 }
 
 // File System Commands
@@ -32,7 +82,8 @@ message DirectoryRequest {
 message DirectoryResponse {
   bool success = 1;
   string error_message = 2;
-  repeated FileInfo files = 3;  
+  repeated FileInfo files = 3;
+  ErrorCode error_code = 4;
 }
 
 message FileInfo {
@@ -43,15 +94,87 @@ message FileInfo {
 }
 
 message FileReadRequest {
-  string path = 1;  
+  string path = 1;
   int64 offset = 2;
-  int32 max_bytes = 3; // max bytes to read
+  int32 max_bytes = 3;
 }
 
 message FileReadResponse {
   bool success = 1;
   string error_message = 2;
-  bytes data = 3;       // raw file bytes
+  bytes data = 3;
   int64 total_file_size = 4;
   bool eof = 5;
+  ErrorCode error_code = 6;
+}
+
+// Metadata for one path, much cheaper than listing its parent.
+message StatRequest {
+  string path = 1;
+}
+
+message StatResponse {
+  bool success = 1;
+  string error_message = 2;
+  ErrorCode error_code = 3;
+  FileInfo info = 4;    // name is "" for the root
+}
+
+message VolumeInfoRequest {}
+
+message VolumeInfoResponse {
+  int64 total_bytes = 1;
+  int64 free_bytes = 2;
+}
+
+// Writing
+
+// Fails with ALREADY_EXISTS if the name is taken.
+message CreateRequest {
+  string path = 1;
+  bool is_directory = 2;
+}
+
+// Into an existing file, growing it if needed.
+message WriteRequest {
+  string path = 1;
+  int64 offset = 2;
+  bytes data = 3;
+}
+
+// Cuts the file short or pads it with zeros.
+message TruncateRequest {
+  string path = 1;
+  int64 size = 2;
+}
+
+// A folder must be empty (DIRECTORY_NOT_EMPTY otherwise).
+message DeleteRequest {
+  string path = 1;
+}
+
+// An existing `to_path` is replaced only with `replace_existing`. Folders are never replaced.
+message RenameRequest {
+  string from_path = 1;
+  string to_path = 2;
+  bool replace_existing = 3;
+}
+
+// Best effort: Android often refuses it, so the phone always says OK.
+message SetTimesRequest {
+  string path = 1;
+  int64 last_modified_ms = 2;
+}
+
+// The PC is done writing: the phone syncs the file and tells the media library.
+message FlushRequest {
+  string path = 1;
+}
+
+message OperationResponse {
+  bool success = 1;
+  string error_message = 2;
+  ErrorCode error_code = 3;
+  FileInfo info = 4;         // afterwards, if it still exists
+  int64 bytes_written = 5;   // WriteRequest only
 }
