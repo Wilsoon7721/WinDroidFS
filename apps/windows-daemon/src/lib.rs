@@ -1,14 +1,18 @@
-//! Code shared by the two WinDroidFS executables:
-//!
-//! - `windows-daemon` (src/main.rs): runs as the normal user; does the USB handshake and talks
-//!   to the phone.
-//! - `windroidfs-service` (src/bin/windroidfs-service.rs): a Windows service running as SYSTEM;
-//!   the only part allowed to switch drivers.
-//!
-//! The daemon asks the service for driver changes over a named pipe (see `ipc`).
-
 pub mod driver;
+pub mod frame;
+pub mod instance;
 pub mod ipc;
+pub mod logging;
+pub mod phone;
+pub mod session;
+pub mod usb_watch;
+pub mod webdav;
+pub mod winfsp_fs;
+
+/// The phone protocol, generated from `packages/binary-protocol/windroid.proto`.
+pub mod windroid {
+    include!(concat!(env!("OUT_DIR"), "/windroid.rs"));
+}
 
 pub mod android {
     //! USB identities shared by the daemon and the driver service.
