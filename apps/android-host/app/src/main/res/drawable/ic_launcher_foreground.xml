@@ -1,14 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive icon foreground: the amber folder with a double-headed transfer arrow.
-
-     The art sits inside the central 72x72 safe zone (x and y from 18 to 90), because a
-     launcher may crop anything outside it.
-
-     Folder and arrow are one path with android:fillType="evenOdd", so the arrow is a real
-     hole rather than a shape painted in the background colour. That matters because the
-     launcher moves the foreground and background independently when you tilt the device —
-     a fake knockout would visibly slide out of register. It also means the monochrome
-     (themed icon) layer works: Android recolours the folder and the hole stays a hole. -->
+<!-- Amber folder with a double-headed arrow cut through it (evenOdd), so the arrow stays a hole
+     in the themed (monochrome) icon too. Sized to the largest that fits the 66dp circle every
+     launcher mask keeps: body 52x40 with 6dp corners, tab 6dp tall. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -17,28 +10,28 @@
     <path
         android:fillColor="#EF9F27"
         android:fillType="evenOdd"
-        android:pathData="M31.5,33.75
-                          H48
-                          A3.75,3.75 0 0 1 51.75,37.5
-                          V40.5
-                          H74.25
-                          A6,6 0 0 1 80.25,46.5
-                          V70.5
-                          A6,6 0 0 1 74.25,76.5
-                          H33.75
-                          A6,6 0 0 1 27.75,70.5
-                          V37.5
-                          A3.75,3.75 0 0 1 31.5,33.75
+        android:pathData="M33,31
+                          H45
+                          A5,5 0 0 1 50,36
+                          V37
+                          H74
+                          A6,6 0 0 1 80,43
+                          V71
+                          A6,6 0 0 1 74,77
+                          H34
+                          A6,6 0 0 1 28,71
+                          V36
+                          A5,5 0 0 1 33,31
                           Z
-                          M34.5,58.5
-                          L48,48
-                          V54
-                          H60
-                          V48
-                          L73.5,58.5
-                          L60,69
-                          V63
-                          H48
-                          V69
+                          M33,57
+                          L47,45.5
+                          V52
+                          H61
+                          V45.5
+                          L75,57
+                          L61,68.5
+                          V62
+                          H47
+                          V68.5
                           Z" />
 </vector>

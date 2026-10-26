@@ -144,6 +144,36 @@ def folder_stacked_arrows(draw, k):
     draw.polygon([(26 * k, 62 * k), (42 * k, 53 * k), (42 * k, 71 * k)], fill=DARK_TILE)
 
 
+AMBER = "#EF9F27"
+# Drawing in this "colour" punches a hole: ImageDraw replaces pixels rather than blending, so
+# a cutout shows whatever is behind the icon (taskbar, desktop, Explorer) on any theme.
+HOLE = (0, 0, 0, 0)
+
+
+def _filling_folder(draw, k, fill):
+    """The folder silhouette grown to fill the canvas, for icons with no tile behind them."""
+    draw.rounded_rectangle(scaled([4, 10, 44, 32], k), radius=7 * k, fill=fill)  # tab
+    draw.rounded_rectangle(scaled([4, 22, 92, 86], k), radius=10 * k, fill=fill)  # body
+
+
+def folder_only_double_arrow(draw, k):
+    """No tile: a big amber folder with a double-headed arrow cut through it."""
+    _filling_folder(draw, k, AMBER)
+    draw.polygon([(12 * k, 56 * k), (34 * k, 37 * k), (34 * k, 75 * k)], fill=HOLE)
+    draw.polygon([(84 * k, 56 * k), (62 * k, 37 * k), (62 * k, 75 * k)], fill=HOLE)
+    draw.rectangle(scaled([30, 48, 66, 64], k), fill=HOLE)
+
+
+def folder_only_arrow(draw, k):
+    """No tile, single arrow: the double head merges into a lump at 16-24px."""
+    _filling_folder(draw, k, AMBER)
+    draw.polygon(
+        [(18 * k, 48 * k), (52 * k, 48 * k), (52 * k, 35 * k), (80 * k, 56 * k),
+         (52 * k, 77 * k), (52 * k, 64 * k), (18 * k, 64 * k)],
+        fill=HOLE,
+    )
+
+
 CONCEPTS = {
     "bolt-phone": bolt_phone,
     "drive-plate": drive_plate,
@@ -154,17 +184,20 @@ CONCEPTS = {
     "folder-amber-arrow": folder_amber_arrow,
     "folder-double-arrow": folder_double_arrow,
     "folder-stacked-arrows": folder_stacked_arrows,
+    "folder-only-double-arrow": folder_only_double_arrow,
+    "folder-only-arrow": folder_only_arrow,
     "windroidfs": None,  # size-dependent, see SIZE_OVERRIDES
 }
 
-# The shipping icon. A double-headed arrow says "transfer" better, but at 16px its two heads
-# merge with the shaft into a lump, so the small frames fall back to the single arrow. Shipping
-# different artwork per size is what a multi-resolution .ico is for.
+# The shipping icon: no tile, just the folder, as large as the canvas allows (a dark tile ate a
+# quarter of a 16px tray icon). A double-headed arrow says "transfer" better, but at 16px its
+# two heads merge with the shaft into a lump, so the small frames fall back to the single
+# arrow. Shipping different artwork per size is what a multi-resolution .ico is for.
 SIZE_OVERRIDES = {
     "windroidfs": {
-        16: folder_amber_arrow,
-        24: folder_amber_arrow,
-        None: folder_double_arrow,  # everything 32 and up
+        16: folder_only_arrow,
+        24: folder_only_arrow,
+        None: folder_only_double_arrow,  # everything 32 and up
     }
 }
 
@@ -177,22 +210,12 @@ def paint_for(name, size):
 
 
 def android_legacy(round_mask):
-    """Pre-API-26 launcher icon: the whole design baked into one bitmap.
+    """Pre-API-26 launcher icon (API 24-25 only; newer ones use the adaptive vectors).
 
-    API 26+ uses the adaptive icon vectors in the Android res/ folder instead; these files
-    only matter on API 24-25, which minSdk still allows.
+    Old launchers don't mask icons into a shape, so with no tile the square and round
+    variants are the same: the Windows artwork at full size.
     """
-
-    def paint(draw, k):
-        box = scaled([0, 0, 96, 96], k)
-        if round_mask:
-            draw.ellipse(box, fill=DARK_TILE)
-        else:
-            draw.rounded_rectangle(box, radius=20 * k, fill=DARK_TILE)
-        _big_folder(draw, k, "#EF9F27")
-        _double_headed_arrow(draw, k, DARK_TILE)
-
-    return paint
+    return folder_only_double_arrow
 
 
 # Density buckets the Android launcher asks for, in px.
