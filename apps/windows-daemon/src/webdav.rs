@@ -1,3 +1,7 @@
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::time::{Duration, SystemTime};
+
 use dav_server::DavHandler;
 use dav_server::davpath::DavPath;
 use dav_server::fs::*;
@@ -7,35 +11,50 @@ use hyper::{
     Server,
     service::{make_service_fn, service_fn},
 };
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, oneshot};
 
-use crate::UsbJob;
-use crate::windroid::packet::Payload;
-use crate::windroid::{DirectoryRequest, FileReadRequest, Packet};
+use crate::phone::{MAX_READ, PhoneClient, PhoneError};
+use crate::windroid::{ErrorCode, FileInfo};
 
 #[derive(Clone, Debug)]
 pub struct AndroidFs {
-    pub tx: mpsc::Sender<UsbJob>,
+    phone: PhoneClient,
 }
 
-impl AndroidFs {
-    async fn send_req(&self, packet: Packet) -> Result<Packet, FsError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(UsbJob {
-                packet,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| FsError::GeneralFailure)?;
+/// Run a blocking call to the phone without stalling the async executor
+async fn blocking<T, F>(f: F) -> FsResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, PhoneError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| FsError::GeneralFailure)?
+        .map_err(fs_error)
+}
 
-        reply_rx
-            .await
-            .map_err(|_| FsError::GeneralFailure)?
-            .map_err(|_| FsError::GeneralFailure)
+fn fs_error(e: PhoneError) -> FsError {
+    match e {
+        PhoneError::Remote {
+            code: ErrorCode::NotFound | ErrorCode::NotADirectory,
+            ..
+        } => FsError::NotFound,
+        PhoneError::Remote {
+            code: ErrorCode::AccessDenied,
+            ..
+        } => FsError::Forbidden,
+        _ => FsError::GeneralFailure,
+    }
+}
+
+fn android_path(path: &DavPath) -> String {
+    let raw = String::from_utf8_lossy(path.as_bytes());
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
     }
 }
 
@@ -43,13 +62,21 @@ impl DavFileSystem for AndroidFs {
     fn open<'a>(
         &'a self,
         path: &'a DavPath,
-        _options: OpenOptions,
+        options: OpenOptions,
     ) -> BoxFuture<'a, FsResult<Box<dyn DavFile>>> {
         async move {
-            let p = path.as_url_string();
+            // Read-only for now
+            if options.write || options.append || options.create || options.create_new {
+                return Err(FsError::Forbidden);
+            }
+            let p = android_path(path);
+            let phone = self.phone.clone();
+            let lookup = p.clone();
+            let info = blocking(move || phone.stat(&lookup)).await?;
             Ok(Box::new(AndroidFile {
-                fs: self.clone(),
+                phone: self.phone.clone(),
                 path: p,
+                info,
                 offset: 0,
             }) as Box<dyn DavFile>)
         }
@@ -62,74 +89,24 @@ impl DavFileSystem for AndroidFs {
         _meta: ReadDirMeta,
     ) -> BoxFuture<'a, FsResult<BoxStream<'static, Box<dyn DavDirEntry>>>> {
         async move {
-            let mut p = path.as_url_string();
-            if p.is_empty() {
-                p = "/".to_string();
-            }
-
-            let req = Packet {
-                payload: Some(Payload::DirRequest(DirectoryRequest { path: p })),
-            };
-            let resp = self.send_req(req).await?;
-
-            if let Some(Payload::DirResponse(dir_resp)) = resp.payload {
-                if dir_resp.success {
-                    let mut entries: Vec<Box<dyn DavDirEntry>> = Vec::new();
-                    for file in dir_resp.files {
-                        entries.push(Box::new(AndroidDirEntry { file }));
-                    }
-                    let stream = futures_util::stream::iter(entries);
-                    Ok(stream.boxed())
-                } else {
-                    Err(FsError::NotFound)
-                }
-            } else {
-                Err(FsError::GeneralFailure)
-            }
+            let p = android_path(path);
+            let phone = self.phone.clone();
+            let files = blocking(move || phone.list_dir(&p)).await?;
+            let entries: Vec<Box<dyn DavDirEntry>> = files
+                .into_iter()
+                .map(|file| Box::new(AndroidDirEntry { file }) as Box<dyn DavDirEntry>)
+                .collect();
+            Ok(futures_util::stream::iter(entries).boxed())
         }
         .boxed()
     }
 
     fn metadata<'a>(&'a self, path: &'a DavPath) -> BoxFuture<'a, FsResult<Box<dyn DavMetaData>>> {
         async move {
-            let p = path.as_url_string();
-            if p.is_empty() || p == "/" {
-                return Ok(Box::new(AndroidMetaData {
-                    size: 0,
-                    is_dir: true,
-                    modified: 0,
-                }) as Box<dyn DavMetaData>);
-            }
-
-            let parent = path.parent();
-            let parent_str = if parent.as_url_string().is_empty() {
-                "/".to_string()
-            } else {
-                parent.as_url_string()
-            };
-
-            let file_name = p
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .last()
-                .unwrap_or("")
-                .to_string();
-
-            let req = Packet {
-                payload: Some(Payload::DirRequest(DirectoryRequest { path: parent_str })),
-            };
-            let resp = self.send_req(req).await?;
-
-            if let Some(Payload::DirResponse(dir_resp)) = resp.payload {
-                if let Some(f) = dir_resp.files.into_iter().find(|f| f.name == file_name) {
-                    return Ok(Box::new(AndroidMetaData {
-                        size: f.size_bytes as u64,
-                        is_dir: f.is_directory,
-                        modified: f.last_modified_ms as u64,
-                    }) as Box<dyn DavMetaData>);
-                }
-            }
-            Err(FsError::NotFound)
+            let p = android_path(path);
+            let phone = self.phone.clone();
+            let info = blocking(move || phone.stat(&p)).await?;
+            Ok(Box::new(AndroidMetaData::from(&info)) as Box<dyn DavMetaData>)
         }
         .boxed()
     }
@@ -139,7 +116,17 @@ impl DavFileSystem for AndroidFs {
 struct AndroidMetaData {
     size: u64,
     is_dir: bool,
-    modified: u64,
+    modified_ms: i64,
+}
+
+impl From<&FileInfo> for AndroidMetaData {
+    fn from(info: &FileInfo) -> Self {
+        AndroidMetaData {
+            size: info.size_bytes.max(0) as u64,
+            is_dir: info.is_directory,
+            modified_ms: info.last_modified_ms,
+        }
+    }
 }
 
 impl DavMetaData for AndroidMetaData {
@@ -150,13 +137,13 @@ impl DavMetaData for AndroidMetaData {
         self.is_dir
     }
     fn modified(&self) -> FsResult<SystemTime> {
-        Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(self.modified))
+        Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(self.modified_ms.max(0) as u64))
     }
 }
 
 #[derive(Debug)]
 struct AndroidDirEntry {
-    file: crate::windroid::FileInfo,
+    file: FileInfo,
 }
 
 impl DavDirEntry for AndroidDirEntry {
@@ -164,76 +151,74 @@ impl DavDirEntry for AndroidDirEntry {
         self.file.name.as_bytes().to_vec()
     }
     fn metadata(&self) -> BoxFuture<'_, FsResult<Box<dyn DavMetaData>>> {
-        async move {
-            Ok(Box::new(AndroidMetaData {
-                size: self.file.size_bytes as u64,
-                is_dir: self.file.is_directory,
-                modified: self.file.last_modified_ms as u64,
-            }) as Box<dyn DavMetaData>)
-        }
-        .boxed()
+        async move { Ok(Box::new(AndroidMetaData::from(&self.file)) as Box<dyn DavMetaData>) }
+            .boxed()
     }
 }
 
 #[derive(Debug)]
 struct AndroidFile {
-    fs: AndroidFs,
+    phone: PhoneClient,
     path: String,
+    info: FileInfo,
     offset: u64,
 }
 
 impl DavFile for AndroidFile {
     fn read_bytes(&mut self, count: usize) -> BoxFuture<'_, FsResult<bytes::Bytes>> {
-        let offset = self.offset;
-        self.offset += count as u64;
-
+        let phone = self.phone.clone();
         let path = self.path.clone();
-        let fs = self.fs.clone();
-
+        let start = self.offset;
         async move {
-            let req = Packet {
-                payload: Some(Payload::FileReq(FileReadRequest {
-                    path,
-                    offset: offset as i64,
-                    max_bytes: count as i32,
-                })),
-            };
-            let resp = fs.send_req(req).await?;
-            if let Some(Payload::FileRes(f_resp)) = resp.payload {
-                if f_resp.success {
-                    Ok(bytes::Bytes::from(f_resp.data))
-                } else {
-                    Err(FsError::GeneralFailure)
+            // A single request is capped at MAX_READ, so larger reads are chunked
+            let data = blocking(move || {
+                let mut out = Vec::with_capacity(count);
+                while out.len() < count {
+                    let want = (count - out.len()).min(MAX_READ as usize) as u32;
+                    let chunk = phone.read(&path, start + out.len() as u64, want)?;
+                    let got = chunk.data.len();
+                    out.extend_from_slice(&chunk.data);
+                    if chunk.eof || got == 0 {
+                        break;
+                    }
                 }
-            } else {
-                Err(FsError::GeneralFailure)
-            }
+                Ok(out)
+            })
+            .await?;
+            self.offset += data.len() as u64;
+            Ok(bytes::Bytes::from(data))
         }
         .boxed()
     }
 
     fn metadata(&mut self) -> BoxFuture<'_, FsResult<Box<dyn DavMetaData>>> {
-        async move { Err(FsError::NotImplemented) }.boxed()
+        let meta = AndroidMetaData::from(&self.info);
+        async move { Ok(Box::new(meta) as Box<dyn DavMetaData>) }.boxed()
     }
 
     fn write_buf(&mut self, _buf: Box<dyn bytes::Buf + Send>) -> BoxFuture<'_, FsResult<()>> {
-        async move { Err(FsError::NotImplemented) }.boxed()
+        async move { Err(FsError::Forbidden) }.boxed()
     }
 
     fn write_bytes(&mut self, _buf: bytes::Bytes) -> BoxFuture<'_, FsResult<()>> {
-        async move { Err(FsError::NotImplemented) }.boxed()
+        async move { Err(FsError::Forbidden) }.boxed()
     }
 
     fn seek(&mut self, pos: std::io::SeekFrom) -> BoxFuture<'_, FsResult<u64>> {
-        let new_offset = match pos {
-            std::io::SeekFrom::Start(off) => off,
-            std::io::SeekFrom::Current(diff) => (self.offset as i64 + diff) as u64,
-            std::io::SeekFrom::End(_) => {
-                return async move { Err(FsError::NotImplemented) }.boxed();
-            }
+        let size = self.info.size_bytes.max(0);
+        let target = match pos {
+            std::io::SeekFrom::Start(off) => Some(off as i64),
+            std::io::SeekFrom::Current(diff) => (self.offset as i64).checked_add(diff),
+            std::io::SeekFrom::End(diff) => size.checked_add(diff),
         };
-        self.offset = new_offset;
-        async move { Ok(new_offset) }.boxed()
+        let result = match target {
+            Some(t) if t >= 0 => {
+                self.offset = t as u64;
+                Ok(self.offset)
+            }
+            _ => Err(FsError::GeneralFailure),
+        };
+        async move { result }.boxed()
     }
 
     fn flush(&mut self) -> BoxFuture<'_, FsResult<()>> {
@@ -241,10 +226,9 @@ impl DavFile for AndroidFile {
     }
 }
 
-pub async fn serve_webdav(tx: mpsc::Sender<UsbJob>) {
-    let fs = AndroidFs { tx };
+pub async fn serve_webdav(phone: PhoneClient, addr: SocketAddr) {
     let dav_server = DavHandler::builder()
-        .filesystem(Box::new(fs))
+        .filesystem(Box::new(AndroidFs { phone }))
         .build_handler();
 
     let make_service = make_service_fn(move |_| {
@@ -258,9 +242,7 @@ pub async fn serve_webdav(tx: mpsc::Sender<UsbJob>) {
         }
     });
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    let server = Server::bind(&addr).serve(make_service);
-    if let Err(e) = server.await {
-        eprintln!("WebDAV server error: {}", e);
+    if let Err(e) = Server::bind(&addr).serve(make_service).await {
+        log::warn!("WebDAV server error: {}", e);
     }
 }

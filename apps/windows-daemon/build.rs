@@ -15,6 +15,16 @@ fn main() {
         .unwrap();
 
     embed_icon(&out_dir);
+
+    // Link WinFsp's DLL as delay-loaded. Without this the .exe would fail to start at all on a machine without WinFsp, instead of starting and falling back to the WebDAV mount.
+    // The DLL is only loaded when the WinFsp code first runs (see winfsp_fs::load_winfsp).
+    winfsp::build::winfsp_link_delayload();
+
+    // That applies /DELAYLOAD to every target, including ones that never use WinFsp (the driver service, the library's tests), and the linker then warns (LNK4199) that it found nothing to delay-load.
+    // LNK4199 only ever means nothing to do so silence it.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg=/IGNORE:4199");
+    }
 }
 
 /// Compile assets/icon.rc and hand the result to the linker, so both .exe files carry the
@@ -45,7 +55,7 @@ fn embed_icon(out_dir: &Path) {
 
     match status {
         Ok(s) if s.success() => {
-            // Applies to the binaries only; the lib target has nothing to link an icon into.
+            // Applies to the binaries only - the lib target has nothing to link an icon into.
             println!("cargo:rustc-link-arg-bins={}", res.display());
         }
         Ok(s) => println!("cargo:warning=rc.exe failed ({s}); building without an exe icon"),
@@ -69,12 +79,10 @@ fn find_rc_exe() -> Option<PathBuf> {
         .filter_map(|bin| std::fs::read_dir(bin).ok())
         .flatten()
         .filter_map(|entry| entry.ok())
-        // SDK versions are directories like "10.0.26100.0"
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("10."))
         .map(|entry| entry.path())
         .collect();
 
-    // Directory order isn't guaranteed; sorting by name puts the newest SDK last.
     candidates.sort();
     candidates
         .iter()
