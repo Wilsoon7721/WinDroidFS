@@ -3,16 +3,20 @@ name = "windows-daemon"
 version = "0.1.0"
 edition = "2024"
 
-# Shared code (driver module, Android IDs, IPC protocol) lives in the library so both the
-# user-level daemon and the privileged service can use it.
+# Shared code (driver module, Android IDs, IPC protocol) lives in the library so both the user-level daemon and the privileged service can use it.
 [lib]
 name = "windroidfs"
 path = "src/lib.rs"
 
-# The user-level daemon: does the USB handshake, asks the service for driver changes.
+# The user-level daemon, console edition: connects to the phone and prints what happens.
 [[bin]]
 name = "windows-daemon"
 path = "src/main.rs"
+
+# The user-level daemon, everyday edition: a tray icon that mounts phones as they're plugged in.
+[[bin]]
+name = "windroidfs"
+path = "src/bin/windroidfs/main.rs"
 
 # The privileged Windows service: the only process allowed to switch drivers.
 [[bin]]
@@ -24,9 +28,12 @@ bytes = "1.12.1"
 dav-server = "0.5.8"
 futures-util = "0.3.34"
 hyper = { version = "0.14", features = ["server", "tcp", "http1"] }
+log = "0.4"
 prost = "0.14.4"
 rusb = "0.9.4"
+tauri-winrt-notification = "0.8.1"
 tokio = { version = "1.54.1", features = ["full"] }
+tray-icon = "0.26.1"
 windows-service = "0.8.1"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
@@ -37,10 +44,16 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+winfsp = { version = "0.13.2", default-features = false, features = ["delayload"] }
 
 [build-dependencies]
 prost-build = "0.14.4"
+winfsp = { version = "0.13.2", default-features = false, features = ["delayload"] }
