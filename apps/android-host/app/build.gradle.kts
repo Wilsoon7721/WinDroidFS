@@ -45,6 +45,11 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        // Lets plain JVM tests run code that touches android.* (FileServer checks
+        // Build.VERSION): the stubs return 0/null instead of throwing "not mocked".
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 protobuf {
