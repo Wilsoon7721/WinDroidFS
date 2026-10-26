@@ -267,6 +267,7 @@ private fun ActiveDashboard(session: ActiveSession, onTerminateClick: () -> Unit
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         ProtocolBanner(session)
+        if (session.usbLink != UsbLink.UNKNOWN) UsbTypeCard(session.usbLink)
 
         SectionLabel("Live Throughput", modifier = Modifier.padding(top = 8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -321,6 +322,32 @@ private fun ProtocolBanner(session: ActiveSession) {
             fontSize = 16.sp,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+private fun UsbTypeCard(link: UsbLink) {
+    WinDroidCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "USB Type",
+                color = WinDroidTheme.colors.textSecondary,
+                fontSize = 14.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = link.label,
+                color = if (link.isSlow) WinDroidTheme.colors.warning else WinDroidTheme.colors.textPrimary,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = link.advice,
+            color = WinDroidTheme.colors.textSecondary,
+            fontSize = 13.sp
         )
     }
 }
@@ -431,6 +458,7 @@ private val previewActiveState = DashboardUiState(
         readBytesPerSecond = 88_300_000,
         writeBytesPerSecond = 41_200_000,
         totalBytesTransferred = 6_420_000_000,
+        usbLink = UsbLink.USB_2_0,
         activeTransfer = TransferInProgress(
             fileName = "VID_20261014_183012.mp4",
             bytesDone = 2_900_000_000,

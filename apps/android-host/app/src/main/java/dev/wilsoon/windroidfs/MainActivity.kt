@@ -1,29 +1,34 @@
 package dev.wilsoon.windroidfs
 
+import android.Manifest
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.core.content.ContextCompat
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.core.content.ContextCompat
+import dev.wilsoon.windroidfs.link.LinkService
+import dev.wilsoon.windroidfs.link.LinkState
+import dev.wilsoon.windroidfs.link.LinkStatus
+import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
 import dev.wilsoon.windroidfs.ui.*
 import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
-import android.hardware.usb.UsbAccessory
-import android.hardware.usb.UsbManager
-import android.os.ParcelFileDescriptor
-import android.util.Log
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import dev.wilsoon.windroidfs.protocol.WinDroidProto
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.IntentFilter
 
 enum class AppScreen {
     ONBOARDING, DASHBOARD, SETTINGS
@@ -31,11 +36,25 @@ enum class AppScreen {
 
 private const val ACTION_USB_PERMISSION = "dev.wilsoon.windroidfs.USB_PERMISSION"
 
+/** The UI. The USB link itself lives in [LinkService]. */
 class MainActivity : ComponentActivity() {
-    private var fileDescriptor: ParcelFileDescriptor? = null
-    private var inputStream: FileInputStream? = null
-    private var outputStream: FileOutputStream? = null
-    private var isConnected = false
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** While on screen, look for the accessory every second: Android's attach intent isn't reliable. */
+    private val accessoryCheck = object : Runnable {
+        override fun run() {
+            checkForExistingAccessory()
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    /** Don't ask for the same accessory's permission every second. */
+    private var permissionRequested = false
+
+    // Without it the link's notification is hidden (Android 13+)
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -44,165 +63,26 @@ class MainActivity : ComponentActivity() {
 
     private fun handleUsbIntent(intent: Intent) {
         if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
-            val usbManager = getSystemService(USB_SERVICE) as UsbManager
             val accessory: UsbAccessory? = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
-
-            if (accessory != null) {
-                try {
-                    fileDescriptor = usbManager.openAccessory(accessory)
-                    if (fileDescriptor != null) {
-                        val fd = fileDescriptor!!.fileDescriptor
-                        inputStream = FileInputStream(fd)
-                        outputStream = FileOutputStream(fd)
-                        isConnected = true
-
-                        Thread {
-                            listenForPackets()
-                        }.start()
-
-                        Log.d("WinDroid", "Successfully connected to Windows Daemon!")
-                    }
-                } catch (e: Exception) {
-                    Log.e("WinDroid", "Error opening accessory: ${e.message}")
-                }
-            }
+            accessory?.let { connect(it) }
         }
     }
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (ACTION_USB_PERMISSION == intent.action) {
-                synchronized(this) {
-                    val accessory: UsbAccessory? = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        accessory?.let { openAccessory(it) }
-                    } else {
-                        Log.d("WinDroid", "Permission denied for accessory")
-                    }
+                val accessory: UsbAccessory? = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
+                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                    accessory?.let { connect(it) }
+                } else {
+                    Log.d("WinDroid", "Permission denied for accessory")
                 }
             }
         }
     }
 
-    private fun listenForPackets() {
-        val buffer = ByteArray(16384)
-
-        while (isConnected && inputStream != null) {
-            try {
-                val bytesRead = inputStream!!.read(buffer)
-
-                if (bytesRead > 0) {
-                    val packetData = buffer.copyOfRange(0, bytesRead)
-                    val packet = WinDroidProto.Packet.parseFrom(packetData)
-
-                    if (packet.hasPing()) {
-                        val pingTimestamp = packet.ping.timestampMs
-                        android.util.Log.d("WinDroid", "✅ RECEIVED PING! Timestamp: $pingTimestamp")
-
-                        val pongMsg = WinDroidProto.Pong.newBuilder()
-                            .setTimestampMs(pingTimestamp)
-                            .build()
-
-                        val responsePacket = WinDroidProto.Packet.newBuilder()
-                            .setPong(pongMsg)
-                            .build()
-
-                        val responseBytes = responsePacket.toByteArray()
-                        outputStream?.write(responseBytes)
-                        outputStream?.flush()
-                    }
-
-                    if (packet.hasDirRequest()) {
-                        val requestedPath = packet.dirRequest.path
-                        android.util.Log.d("WinDroid", "PC requested directory: $requestedPath")
-
-                        val rootStorage = Environment.getExternalStorageDirectory().absolutePath
-
-                        val targetPath = if (requestedPath == "/") rootStorage else "$rootStorage$requestedPath"
-                        val targetDir = java.io.File(targetPath)
-
-                        val responseBuilder = WinDroidProto.DirectoryResponse.newBuilder()
-
-                        if (targetDir.exists() && targetDir.isDirectory) {
-                            responseBuilder.success = true
-
-                            val files = targetDir.listFiles()
-                            if (files != null) {
-                                for (file in files) {
-                                    val fileInfo = WinDroidProto.FileInfo.newBuilder()
-                                        .setName(file.name)
-                                        .setSizeBytes(if (file.isDirectory) 0 else file.length())
-                                        .setIsDirectory(file.isDirectory)
-                                        .setLastModifiedMs(file.lastModified())
-                                        .build()
-
-                                    responseBuilder.addFiles(fileInfo)
-                                }
-                            }
-                        } else {
-                            responseBuilder.success = false
-                            responseBuilder.errorMessage = "Path does not exist or is not a directory"
-                        }
-
-                        val responsePacket = WinDroidProto.Packet.newBuilder().setDirResponse(responseBuilder).build()
-
-                        val responseBytes = responsePacket.toByteArray()
-                        outputStream?.write(responseBytes)
-                        outputStream?.flush()
-                    }
-
-                    if (packet.hasFileReq()) {
-                        val req = packet.fileReq
-
-                        val rootStorage = Environment.getExternalStorageDirectory().absolutePath
-                        val targetPath = if (req.path == "/") rootStorage else "$rootStorage${req.path}"
-                        val targetFile = java.io.File(targetPath)
-
-                        val responseBuilder = WinDroidProto.FileReadResponse.newBuilder()
-
-                        if (targetFile.exists() && targetFile.isFile) {
-                            try {
-                                val raf = java.io.RandomAccessFile(targetFile, "r")
-                                raf.seek(req.offset)
-
-                                val chunk = ByteArray(req.maxBytes)
-                                val bytesRead = raf.read(chunk)
-
-                                responseBuilder.success = true
-                                responseBuilder.totalFileSize = targetFile.length()
-
-                                if (bytesRead > 0) {
-                                    responseBuilder.data = com.google.protobuf.ByteString.copyFrom(chunk, 0, bytesRead)
-                                    responseBuilder.eof = (req.offset + bytesRead) >= targetFile.length()
-                                } else {
-                                    responseBuilder.data = com.google.protobuf.ByteString.EMPTY
-                                    responseBuilder.eof = true
-                                }
-                                raf.close()
-
-                            } catch (e: Exception) {
-                                responseBuilder.success = false
-                                responseBuilder.errorMessage = e.message ?: "Unknown read error"
-                            }
-                        } else {
-                            responseBuilder.success = false
-                            responseBuilder.errorMessage = "File not found or is a directory"
-                        }
-
-                        val responsePacket = WinDroidProto.Packet.newBuilder()
-                            .setFileRes(responseBuilder)
-                            .build()
-
-                        outputStream?.write(responsePacket.toByteArray())
-                        outputStream?.flush()
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("WinDroid", "Stream read error or disconnected: ${e.message}")
-                isConnected = false
-                break
-            }
-        }
+    private fun connect(accessory: UsbAccessory) {
+        LinkService.connect(this, accessory)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -212,6 +92,13 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
         setContent {
             WinDroidTheme {
                 WinDroidApp()
@@ -219,13 +106,20 @@ class MainActivity : ComponentActivity() {
         }
 
         handleUsbIntent(intent)
-        checkForExistingAccessory()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.post(accessoryCheck)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(accessoryCheck)
+        super.onPause()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        isConnected = false
-        fileDescriptor?.close()
         unregisterReceiver(usbReceiver)
     }
 
@@ -237,6 +131,7 @@ class MainActivity : ComponentActivity() {
 
         var dashboardState by remember { mutableStateOf(DashboardUiState()) }
         var settingsState by remember { mutableStateOf(SettingsUiState()) }
+        val linkStatus by LinkState.status.collectAsState()
 
         when (currentScreen) {
             AppScreen.ONBOARDING -> {
@@ -252,15 +147,12 @@ class MainActivity : ComponentActivity() {
 
             AppScreen.DASHBOARD -> {
                 MainScreen(
-                    state = dashboardState,
+                    state = dashboardState.copy(session = linkStatus?.toSession()),
                     onMethodSelected = { dashboardState = dashboardState.copy(expandedMethod = it) },
                     onOpenSettings = { currentScreen = AppScreen.SETTINGS },
                     onOpenDeveloperOptions = { openDeveloperOptions() },
                     onOpenTetheringSettings = { openTetheringSettings() },
-                    onTerminateConnection = {
-                        // For now, just drop the fake session
-                        dashboardState = dashboardState.copy(session = null)
-                    }
+                    onTerminateConnection = { LinkService.disconnect(this) }
                 )
             }
 
@@ -282,6 +174,27 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** Only Direct USB exists so far. */
+    private fun LinkStatus.toSession() = ActiveSession(
+        method = ConnectionMethod.AOA,
+        hostName = hostName.ifEmpty { "your PC" },
+        uptimeSeconds = (System.currentTimeMillis() - connectedAtMs) / 1000,
+        readBytesPerSecond = readBytesPerSecond,
+        writeBytesPerSecond = writeBytesPerSecond,
+        totalBytesTransferred = totalBytes,
+        activeTransfer = currentWrite?.let {
+            TransferInProgress(fileName = it.fileName, bytesDone = it.bytesDone, bytesTotal = it.bytesTotal)
+        },
+        usbLink = when (usbSpeed) {
+            UsbSpeed.USB_SPEED_LOW -> UsbLink.USB_1_0
+            UsbSpeed.USB_SPEED_FULL -> UsbLink.USB_1_1
+            UsbSpeed.USB_SPEED_HIGH -> UsbLink.USB_2_0
+            UsbSpeed.USB_SPEED_SUPER -> UsbLink.USB_3_0
+            UsbSpeed.USB_SPEED_SUPER_PLUS -> UsbLink.USB_3_1
+            else -> UsbLink.UNKNOWN
+        }
+    )
 
     private fun hasAllFilesPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -327,50 +240,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkForExistingAccessory() {
-        if (isConnected) return
+        if (LinkState.status.value != null) return
 
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val accessoryList = usbManager.accessoryList
 
-        if (accessoryList != null && accessoryList.isNotEmpty()) {
-            val acc = accessoryList.find {
-                it.manufacturer == "Wilson Oon" && it.model == "WinDroidFS"
-            }
-
-            acc?.let { accessory ->
-                if (usbManager.hasPermission(accessory)) {
-                    openAccessory(accessory)
-                } else {
-                    val intent = Intent(ACTION_USB_PERMISSION).apply {
-                        setPackage(packageName)
-                    }
-                    val permissionIntent = PendingIntent.getBroadcast(
-                        this,
-                        0,
-                        intent,
-                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                    )
-                    usbManager.requestPermission(accessory, permissionIntent)
-                }
-            }
+        val accessory = accessoryList?.find {
+            it.manufacturer == "Wilson Oon" && it.model == "WinDroidFS"
         }
-    }
+        if (accessory == null) {
+            permissionRequested = false
+            return
+        }
 
-    private fun openAccessory(accessory: UsbAccessory) {
-        try {
-            val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-            fileDescriptor = usbManager.openAccessory(accessory)
-            if (fileDescriptor != null) {
-                val fd = fileDescriptor!!.fileDescriptor
-                inputStream = FileInputStream(fd)
-                outputStream = FileOutputStream(fd)
-                isConnected = true
-
-                Thread { listenForPackets() }.start()
-                Log.d("WinDroid", "Successfully connected to Windows Daemon via Manual Scan!")
+        if (usbManager.hasPermission(accessory)) {
+            connect(accessory)
+        } else if (!permissionRequested) {
+            permissionRequested = true
+            val intent = Intent(ACTION_USB_PERMISSION).apply {
+                setPackage(packageName)
             }
-        } catch (e: Exception) {
-            Log.e("WinDroid", "Error opening accessory manually: ${e.message}")
+            val permissionIntent = PendingIntent.getBroadcast(
+                this,
+                0,
+                intent,
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            usbManager.requestPermission(accessory, permissionIntent)
         }
     }
 }

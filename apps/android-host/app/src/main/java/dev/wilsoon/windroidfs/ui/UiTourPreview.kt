@@ -89,6 +89,7 @@ private fun fakeSession(connection: FakeConnection): ActiveSession? = when (conn
         readBytesPerSecond = 88_300_000,
         writeBytesPerSecond = if (connection == FakeConnection.TRANSFERRING) 41_200_000 else 0,
         totalBytesTransferred = 6_420_000_000,
+        usbLink = UsbLink.USB_2_0,
         activeTransfer = if (connection == FakeConnection.TRANSFERRING) {
             TransferInProgress("VID_20261014_183012.mp4", 2_900_000_000, 4_200_000_000)
         } else null

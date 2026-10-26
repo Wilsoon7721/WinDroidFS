@@ -23,8 +23,28 @@ data class ActiveSession(
     val writeBytesPerSecond: Long,
     val totalBytesTransferred: Long,
     // null = nothing being written right now (safe to terminate without a warning).
-    val activeTransfer: TransferInProgress? = null
+    val activeTransfer: TransferInProgress? = null,
+    val usbLink: UsbLink = UsbLink.UNKNOWN
 )
+
+// [maxSpeed] is set for links slower than USB 3. Same words as speed_advice in session.rs.
+enum class UsbLink(val label: String, val maxSpeed: String?) {
+    UNKNOWN("Unknown", null),
+    USB_1_0("USB 1.0", "0.2 MB/s"),
+    USB_1_1("USB 1.1", "1.5 MB/s"),
+    USB_2_0("USB 2.0", "60 MB/s"),
+    USB_3_0("USB 3.0", null),
+    USB_3_1("USB 3.1+", null);
+
+    val isSlow: Boolean get() = maxSpeed != null
+
+    val advice: String
+        get() = if (maxSpeed != null) {
+            "Maxes out at $maxSpeed, use a USB 3.0+ port or supported cable to increase this"
+        } else {
+            "Fast enough for full-speed transfers"
+        }
+}
 
 data class TransferInProgress(
     val fileName: String,
