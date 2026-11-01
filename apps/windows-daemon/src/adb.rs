@@ -85,6 +85,39 @@ impl Drop for Forward {
     }
 }
 
+/// The phone app's link service and main screen. Must match the manifest.
+const APP_SERVICE: &str = "dev.wilsoon.windroidfs/.link.LinkService";
+const APP_ADB_ACTION: &str = "dev.wilsoon.windroidfs.action.ADB";
+const APP_SCREEN: &str = "dev.wilsoon.windroidfs/.MainActivity";
+
+/// Get the phone app listening without anyone opening it. Quietly as a service if Android allows it, else by opening the app.
+pub fn start_app(phone: &AdbPhone) {
+    // `am` reports a refusal as "Error: ..." rather than through its exit code.
+    let am = |args: &[&str]| {
+        let mut full = vec!["-s", &phone.serial, "shell", "am"];
+        full.extend_from_slice(args);
+        Command::new(&phone.exe)
+            .args(&full)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .is_ok_and(|out| {
+                let said = [out.stdout, out.stderr].concat();
+                out.status.success() && !String::from_utf8_lossy(&said).contains("Error")
+            })
+    };
+    if am(&[
+        "start-foreground-service",
+        "-n",
+        APP_SERVICE,
+        "-a",
+        APP_ADB_ACTION,
+    ]) {
+        log::info!("📱 Started the WinDroidFS app on the phone through adb.");
+    } else if am(&["start", "-n", APP_SCREEN]) {
+        log::info!("📱 Opened the WinDroidFS app on the phone through adb.");
+    }
+}
+
 /// Connect to the phone app through adb
 pub fn connect(phone: &AdbPhone) -> Option<(TcpStream, Forward)> {
     let out = run(

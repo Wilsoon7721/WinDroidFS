@@ -35,9 +35,12 @@
             </intent-filter>
             <meta-data android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"  android:resource="@xml/accessory_filter" />
         </activity>
+        <!-- Exported so the PC can start it through adb (`am start-foreground-service`). DUMP is held by
+             adb's shell, never by ordinary apps, and the files stay behind Adb.isAdbd either way. -->
         <service
             android:name=".link.LinkService"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:foregroundServiceType="connectedDevice" />
     </application>
 

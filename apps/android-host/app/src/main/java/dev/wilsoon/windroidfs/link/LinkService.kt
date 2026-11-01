@@ -261,8 +261,40 @@ class LinkService : Service() {
 
     private fun routeEnded(route: LinkTransport) {
         routes.remove(route)?.let(::quietlyClose)
-        val linkEnded = claimed.get() && route == transport
-        if (linkEnded || (!claimed.get() && routes.isEmpty())) mainHandler.post { stopSelf() }
+        if (claimed.get() && route == transport) {
+            mainHandler.post(::linkEnded)
+        } else if (!claimed.get() && routes.isEmpty()) {
+            mainHandler.post { stopSelf() }
+        }
+    }
+
+    /** The PC left. Unless Disconnect was pressed, wait on whatever routes are left, so the next PC finds the app without it being opened. */
+    private fun linkEnded() {
+        wakeLock?.takeIf { it.isHeld }?.release()
+        wakeLock = null
+        pcSeen = false
+        sayingGoodbye = false
+        claimed.set(false)
+        hostName = ""
+        usbSpeed = UsbSpeed.USB_SPEED_UNKNOWN
+        if (LinkState.endedByUser) {
+            stopSelf()
+            return
+        }
+        lastNotifiedHost = null
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(null))
+        offerAvailableRoutes()
+        if (routes.isEmpty()) stopSelf()
+    }
+
+    private fun offerAvailableRoutes() {
+        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        usbManager.accessoryList
+            ?.find { it.manufacturer == "Wilson Oon" && it.model == "WinDroidFS" }
+            ?.takeIf(usbManager::hasPermission)
+            ?.let(::offerAccessory)
+        offerTethering()
+        if (Adb.available(this)) offerAdb()
     }
 
     private fun serve(route: LinkTransport, input: InputStream, output: OutputStream) {
@@ -393,8 +425,8 @@ class LinkService : Service() {
         val silentFor = System.currentTimeMillis() - lastActivityMs
         if (!handlingRequest && silentFor > PC_SILENCE_TIMEOUT_MS) {
             Log.i(TAG, "No word from the PC for ${silentFor / 1000}s; ending the link")
-            running = false
-            mainHandler.post { stopSelf() }
+            // Its thread then ends and the routes reopen (see linkEnded)
+            routes[transport]?.let(::quietlyClose)
             return
         }
         val read = bytesRead.get()

@@ -408,8 +408,11 @@ fn connect_adb(
         }
         if !asked {
             asked = true;
+            adb::start_app(phone);
             log::info!("📱 Waiting for the WinDroidFS app on the phone.");
-            log::info!("   -> Open it on the phone (and update it if it's an older build).");
+            log::info!(
+                "   -> If it doesn't start by itself, open it on the phone (and update it if it's an older build)."
+            );
             on_event(Event::WaitingForApp);
         }
         if stop.sleep(Duration::from_secs(1)) {
