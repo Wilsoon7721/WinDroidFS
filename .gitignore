@@ -141,3 +141,5 @@ google-services.json
 *.hprof
 
 .vscode
+# WinFsp installer for the Windows installer build (downloaded by hand, see apps/windows-daemon/README.md)
+apps/windows-daemon/installer/deps/

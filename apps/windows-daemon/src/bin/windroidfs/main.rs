@@ -19,12 +19,12 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, PostQuitMessage, PostThreadMessageW, TranslateMessage,
-    WM_APP,
+    DispatchMessageW, GetMessageW, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PostQuitMessage,
+    PostThreadMessageW, TranslateMessage, WM_APP,
 };
 use windows_sys::core::BOOL;
 use windroidfs::ipc::transport;
-use windroidfs::session::{self, DriveChoice, Ended, Event, Options, Stop, UsbSpeed};
+use windroidfs::session::{self, DriveChoice, Ended, Event, LinkChoice, Options, Stop, UsbSpeed};
 use windroidfs::usb_watch::UsbWatch;
 use windroidfs::{instance, logging};
 
@@ -51,6 +51,16 @@ const SERVICE_RETRY: Duration = Duration::from_secs(3);
 
 /// The `ICON` resource embedded by build.rs (assets/icon.rc).
 const ICON_RESOURCE: u16 = 1;
+
+/// WinFsp's FLOSS exception requires this notice and link in the user interface.
+const ABOUT_TEXT: &str = concat!(
+    "WinDroidFS ",
+    env!("CARGO_PKG_VERSION"),
+    "\nMounts your Android phone as a drive over USB.\n\n",
+    "Uses WinFsp - Windows File System Proxy,\n",
+    "Copyright (C) Bill Zissimopoulos\n",
+    "https://github.com/winfsp/winfsp",
+);
 
 /// What's happening, as the tray shows it.
 #[derive(Clone, Debug, PartialEq)]
@@ -251,7 +261,7 @@ fn supervise(shared: &Shared) {
             continue;
         }
 
-        if !session::phone_present() {
+        if !session::phone_present(settings.link) {
             wait_for_unplug = false;
             shared.set_status(Status::WaitingForPhone);
             shared.watch.wait(FALLBACK_POLL);
@@ -262,7 +272,7 @@ fn supervise(shared: &Shared) {
             continue;
         }
 
-        if !transport::service_available() {
+        if session::needs_service(settings.link) && !transport::service_available() {
             shared.set_status(Status::NoService);
             shared.watch.wait(SERVICE_RETRY);
             continue;
@@ -279,6 +289,7 @@ fn supervise(shared: &Shared) {
             drive: settings.drive,
             read_only: settings.read_only,
             hide_dotfiles: settings.hide_dotfiles,
+            link: settings.link,
         };
         let open_when_mounted = settings.open_on_mount && !remounting;
         remounting = false;
@@ -341,9 +352,11 @@ struct Tray {
     open: MenuItem,
     enabled: CheckMenuItem,
     drives: Vec<(DriveChoice, CheckMenuItem)>,
+    links: Vec<(LinkChoice, CheckMenuItem)>,
     toggles: Vec<Toggle>,
     open_log: MenuItem,
     autostart: CheckMenuItem,
+    about: MenuItem,
     quit: MenuItem,
     /// The status version last shown
     shown_version: u64,
@@ -369,6 +382,18 @@ impl Tray {
         let drive_menu = Submenu::new("Drive letter", true);
         for (_, item) in &drives {
             drive_menu.append(item)?;
+        }
+
+        let links = [
+            (LinkChoice::Auto, "Automatic (USB tethering if it's on)"),
+            (LinkChoice::DirectUsb, "Direct USB only"),
+            (LinkChoice::Tethering, "USB tethering only"),
+        ]
+        .map(|(choice, text)| (choice, CheckMenuItem::new(text, true, false, None)))
+        .to_vec();
+        let link_menu = Submenu::new("Connect over", true);
+        for (_, item) in &links {
+            link_menu.append(item)?;
         }
 
         let toggle = |text: &str, field: fn(&mut Settings) -> &mut bool, remount: bool| {
@@ -410,6 +435,7 @@ impl Tray {
 
         let autostart =
             CheckMenuItem::new("Start with Windows", true, autostart::is_enabled(), None);
+        let about = MenuItem::new("About WinDroidFS", true, None);
         let quit = MenuItem::new("Quit WinDroidFS", true, None);
 
         let menu = Menu::new();
@@ -418,11 +444,13 @@ impl Tray {
             &open,
             &PredefinedMenuItem::separator(),
             &enabled,
+            &link_menu,
             &drive_menu,
             &options_menu,
             &troubleshooting_menu,
             &autostart,
             &PredefinedMenuItem::separator(),
+            &about,
             &quit,
         ];
         menu.append_items(items)?;
@@ -440,13 +468,16 @@ impl Tray {
             open,
             enabled,
             drives,
+            links,
             toggles,
             open_log,
             autostart,
+            about,
             quit,
             shown_version: 0,
         };
         tray.show_drive_choice(settings.drive);
+        tray.show_link_choice(settings.link);
         tray.refresh(shared);
         Ok(tray)
     }
@@ -481,6 +512,8 @@ impl Tray {
             open_drive(shared);
         } else if id == self.open_log.id() {
             open_log_folder();
+        } else if id == self.about.id() {
+            show_about();
         } else if id == self.enabled.id() {
             let enabled = self.enabled.is_checked();
             self.update_settings(shared, |s| s.enabled = enabled);
@@ -513,6 +546,25 @@ impl Tray {
             if changed && matches!(shared.status(), Status::Mounted { .. }) {
                 shared.stop_session(true);
             }
+        } else if let Some(choice) = self
+            .links
+            .iter()
+            .find(|(_, item)| id == item.id())
+            .map(|(choice, _)| *choice)
+        {
+            self.show_link_choice(choice);
+            let changed = shared.settings().link != choice;
+            self.update_settings(shared, |s| s.link = choice);
+            if changed {
+                // Also drops a link still waiting on the old route
+                if matches!(
+                    shared.status(),
+                    Status::Connecting | Status::WaitingForApp | Status::Mounted { .. }
+                ) {
+                    shared.stop_session(true);
+                }
+                shared.watch.wake();
+            }
         }
     }
 
@@ -531,6 +583,12 @@ impl Tray {
         let mut settings = lock(&shared.settings);
         change(&mut settings);
         settings.save();
+    }
+
+    fn show_link_choice(&self, choice: LinkChoice) {
+        for (item_choice, item) in &self.links {
+            item.set_checked(*item_choice == choice);
+        }
     }
 
     fn show_drive_choice(&self, choice: DriveChoice) {
@@ -582,6 +640,19 @@ fn warn_if_slow(shared: &Shared, speed: UsbSpeed) {
         &format!("USB Type: {}", session::speed_name(speed)),
         &advice,
     );
+}
+
+fn show_about() {
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, caption) = (wide(ABOUT_TEXT), wide("About WinDroidFS"));
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        )
+    };
 }
 
 /// Open the folder holding the log file in Explorer.

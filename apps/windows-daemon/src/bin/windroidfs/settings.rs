@@ -2,13 +2,14 @@
 
 use std::path::PathBuf;
 
-use windroidfs::session::DriveChoice;
+use windroidfs::session::{DriveChoice, LinkChoice};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// Mount phones when they're plugged in. Off leaves phones alone (MTP works as usual).
     pub enabled: bool,
     pub drive: DriveChoice,
+    pub link: LinkChoice,
     /// Open the drive in Explorer once it's mounted, like a USB stick.
     pub open_on_mount: bool,
     /// Mount without write access.
@@ -26,6 +27,7 @@ impl Default for Settings {
         Settings {
             enabled: true,
             drive: DriveChoice::Auto,
+            link: LinkChoice::Auto,
             open_on_mount: true,
             read_only: false,
             hide_dotfiles: true,
@@ -70,6 +72,7 @@ impl Settings {
             match key.trim() {
                 "enabled" => settings.enabled = flag(settings.enabled),
                 "drive" => settings.drive = parse_drive(value),
+                "connect_over" => settings.link = parse_link(value),
                 "open_on_mount" => settings.open_on_mount = flag(settings.open_on_mount),
                 "read_only" => settings.read_only = flag(settings.read_only),
                 "hide_dotfiles" => settings.hide_dotfiles = flag(settings.hide_dotfiles),
@@ -86,8 +89,13 @@ impl Settings {
             DriveChoice::Auto => "auto".to_string(),
             DriveChoice::Letter(letter) => letter.to_string(),
         };
+        let link = match self.link {
+            LinkChoice::Auto => "auto",
+            LinkChoice::DirectUsb => "direct_usb",
+            LinkChoice::Tethering => "tethering",
+        };
         format!(
-            "enabled={}\ndrive={drive}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
@@ -106,6 +114,15 @@ fn parse_drive(value: &str) -> DriveChoice {
             DriveChoice::Letter(letter.to_ascii_uppercase())
         }
         _ => DriveChoice::Auto,
+    }
+}
+
+/// "direct_usb" or "tethering". Anything else is automatic.
+fn parse_link(value: &str) -> LinkChoice {
+    match value {
+        "direct_usb" => LinkChoice::DirectUsb,
+        "tethering" => LinkChoice::Tethering,
+        _ => LinkChoice::Auto,
     }
 }
 
@@ -129,6 +146,7 @@ mod tests {
             Settings {
                 enabled: false,
                 drive: DriveChoice::Letter('P'),
+                link: LinkChoice::Tethering,
                 open_on_mount: false,
                 read_only: true,
                 hide_dotfiles: false,

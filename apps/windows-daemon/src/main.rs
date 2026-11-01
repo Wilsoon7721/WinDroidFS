@@ -1,10 +1,11 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusb::UsbContext;
 use windroidfs::android::{is_aoa_identity, is_normal_android_identity};
 use windroidfs::ipc::transport::{self, send};
 use windroidfs::ipc::{Request, Response};
-use windroidfs::session::{self, Ended, Event, Options, Stop};
+use windroidfs::phone::{MAX_READ, MAX_WRITE, PhoneClient, PhoneError};
+use windroidfs::session::{self, Ended, Event, LinkChoice, Options, Stop};
 use windroidfs::{instance, logging};
 
 /// After the phone disconnects, how often and how many times to look for it coming back before giving up and exiting.
@@ -19,8 +20,16 @@ fn main() -> rusb::Result<()> {
         return Ok(());
     }
 
+    let flag = |name: &str| std::env::args().any(|a| a == name);
     let options = Options {
-        force_webdav: std::env::args().any(|a| a == "--webdav"),
+        force_webdav: flag("--webdav"),
+        link: if flag("--tethering") {
+            LinkChoice::Tethering
+        } else if flag("--direct-usb") {
+            LinkChoice::DirectUsb
+        } else {
+            LinkChoice::Auto
+        },
         ..Options::default()
     };
 
@@ -32,10 +41,15 @@ fn main() -> rusb::Result<()> {
         return Ok(());
     };
 
-    if !transport::service_available() {
+    if session::needs_service(options.link) && !transport::service_available() {
         println!("❌ The WinDroidFS driver service isn't reachable.");
         println!("   -> Make sure WinDroidFS is installed, or start it with:");
         println!("        windroidfs-service start   (Run as Administrator)");
+        return Ok(());
+    }
+
+    if std::env::args().nth(1).as_deref() == Some("bench") {
+        bench_command(options.link);
         return Ok(());
     }
 
@@ -103,6 +117,116 @@ fn catch_ctrl_c(stop: &Stop) {
             });
         });
     });
+}
+
+/// Where `bench` puts its test file on the phone. Deleted afterwards.
+const BENCH_PATH: &str = "/Download/.windroidfs-bench.tmp";
+const BENCH_PINGS: usize = 50;
+/// Default size of the test file in MiB; `windows-daemon bench 512` overrides it.
+const BENCH_DEFAULT_MIB: usize = 128;
+
+/// Measure the link without mounting: request round-trip time, then write and read speed.
+fn bench_command(link: LinkChoice) {
+    let mib: usize = std::env::args()
+        .nth(2)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(BENCH_DEFAULT_MIB);
+
+    let stop = Stop::new();
+    let Ok(connected) = session::connect(link, &stop, &|_| {}) else {
+        return; // already explained by session::connect
+    };
+    let phone = connected.phone;
+    println!(
+        "\n📏 Benchmarking {} over {}, {mib} MiB test file\n",
+        connected.device_name,
+        session::speed_name(phone.usb_speed())
+    );
+
+    if let Err(e) = bench(&phone, mib) {
+        println!("❌ Benchmark failed: {e}");
+    }
+    let _ = phone.delete(BENCH_PATH);
+    phone.goodbye();
+}
+
+fn bench(phone: &PhoneClient, mib: usize) -> Result<(), PhoneError> {
+    // Round trip with (almost) no data: the fixed cost every request pays.
+    let mut pings = Vec::with_capacity(BENCH_PINGS);
+    for _ in 0..BENCH_PINGS {
+        let started = Instant::now();
+        phone.ping()?;
+        pings.push(started.elapsed());
+    }
+    pings.sort();
+    println!(
+        "Ping      min {:>6.2} ms   median {:>6.2} ms   max {:>6.2} ms",
+        ms(pings[0]),
+        ms(pings[pings.len() / 2]),
+        ms(pings[pings.len() - 1])
+    );
+
+    // Pseudo-random, so nothing along the way can compress it.
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let chunk: Vec<u8> = (0..MAX_WRITE)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+
+    let _ = phone.delete(BENCH_PATH);
+    phone.create(BENCH_PATH, false)?;
+    let total = (mib * 1024 * 1024) as u64;
+    let requests = total.div_ceil(MAX_WRITE as u64);
+
+    let started = Instant::now();
+    let mut offset = 0u64;
+    while offset < total {
+        let len = (total - offset).min(MAX_WRITE as u64) as usize;
+        let (written, _) = phone.write(BENCH_PATH, offset, &chunk[..len])?;
+        offset += written;
+    }
+    let writing = started.elapsed();
+    let started = Instant::now();
+    phone.flush(BENCH_PATH)?;
+    let syncing = started.elapsed();
+    report("Write", total, writing, requests);
+    println!(
+        "          then {:.2} s for the phone to sync it to storage",
+        syncing.as_secs_f64()
+    );
+
+    let started = Instant::now();
+    let mut offset = 0u64;
+    let mut reads = 0u64;
+    while offset < total {
+        let len = (total - offset).min(MAX_READ as u64) as u32;
+        let got = phone.read(BENCH_PATH, offset, len)?;
+        if got.data.is_empty() {
+            break;
+        }
+        offset += got.data.len() as u64;
+        reads += 1;
+    }
+    report("Read", offset, started.elapsed(), reads);
+    Ok(())
+}
+
+fn report(what: &str, bytes: u64, took: Duration, requests: u64) {
+    let secs = took.as_secs_f64();
+    println!(
+        "{what:<9} {:>6.1} MB/s   ({:.2} s, {:.1} ms per 1 MiB request)",
+        bytes as f64 / 1_048_576.0 / secs,
+        secs,
+        ms(took) / requests.max(1) as f64
+    );
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
 }
 
 fn restore_drivers_command() {

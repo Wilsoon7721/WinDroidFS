@@ -25,6 +25,8 @@ import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import dev.wilsoon.windroidfs.link.LinkService
 import dev.wilsoon.windroidfs.link.LinkState
+import dev.wilsoon.windroidfs.link.LinkTransport
+import dev.wilsoon.windroidfs.link.Tethering
 import dev.wilsoon.windroidfs.link.LinkStatus
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
 import dev.wilsoon.windroidfs.ui.*
@@ -36,12 +38,10 @@ enum class AppScreen {
 
 private const val ACTION_USB_PERMISSION = "dev.wilsoon.windroidfs.USB_PERMISSION"
 
-/** The UI. The USB link itself lives in [LinkService]. */
 class MainActivity : ComponentActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    /** While on screen, look for the accessory every second: Android's attach intent isn't reliable. */
     private val accessoryCheck = object : Runnable {
         override fun run() {
             checkForExistingAccessory()
@@ -49,10 +49,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Don't ask for the same accessory's permission every second. */
     private var permissionRequested = false
-
-    // Without it the link's notification is hidden (Android 13+)
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -147,7 +144,7 @@ class MainActivity : ComponentActivity() {
 
             AppScreen.DASHBOARD -> {
                 MainScreen(
-                    state = dashboardState.copy(session = linkStatus?.toSession()),
+                    state = dashboardState.copy(session = linkStatus?.takeUnless { it.waitingForPc }?.toSession()),
                     onMethodSelected = { dashboardState = dashboardState.copy(expandedMethod = it) },
                     onOpenSettings = { currentScreen = AppScreen.SETTINGS },
                     onOpenDeveloperOptions = { openDeveloperOptions() },
@@ -175,11 +172,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Only Direct USB exists so far. */
     private fun LinkStatus.toSession() = ActiveSession(
-        method = ConnectionMethod.AOA,
+        method = when (transport) {
+            LinkTransport.ACCESSORY -> ConnectionMethod.AOA
+            LinkTransport.TETHERING -> ConnectionMethod.TETHERING
+        },
         hostName = hostName.ifEmpty { "your PC" },
-        uptimeSeconds = (System.currentTimeMillis() - connectedAtMs) / 1000,
+        uptimeSeconds = uptimeSeconds,
         readBytesPerSecond = readBytesPerSecond,
         writeBytesPerSecond = writeBytesPerSecond,
         totalBytesTransferred = totalBytes,
@@ -250,6 +249,7 @@ class MainActivity : ComponentActivity() {
         }
         if (accessory == null) {
             permissionRequested = false
+            if (Tethering.address() != null) LinkService.listenOnTethering(this)
             return
         }
 

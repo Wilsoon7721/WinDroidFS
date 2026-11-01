@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::driver;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
-use crate::{webdav, winfsp_fs};
+use crate::{tether, webdav, winfsp_fs};
 
 pub use crate::windroid::UsbSpeed;
 pub use crate::winfsp_fs::DriveChoice;
@@ -28,6 +28,10 @@ const AOA_START: u8 = 53;
 const WEBDAV_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 8080);
 pub const WINFSP_DOWNLOAD: &str = "https://winfsp.dev/rel/";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// How long to look for the phone. It drops off the bus for a moment while leaving Accessory Mode after the last link.
+const FIND_PHONE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Windows sometimes refuses a driver swap while the phone is still settling after re-enumerating.
+const SWAP_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -39,6 +43,29 @@ pub struct Options {
     pub read_only: bool,
     /// Show dot-files as hidden. (WinFsp only)
     pub hide_dotfiles: bool,
+    /// Which link to use.
+    pub link: LinkChoice,
+}
+
+/// Which link to use with a phone that could do either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkChoice {
+    /// USB tethering if it's on, otherwise Direct USB.
+    #[default]
+    Auto,
+    /// Direct USB (Accessory Mode) even when tethering is on, which it turns off.
+    DirectUsb,
+    /// Only USB tethering: never switches the phone into Accessory Mode, just waits for tethering.
+    Tethering,
+}
+
+/// Whether connecting may need the driver service. Only Direct USB swaps drivers.
+pub fn needs_service(link: LinkChoice) -> bool {
+    match link {
+        LinkChoice::Auto => tether::phone_address().is_none(),
+        LinkChoice::DirectUsb => true,
+        LinkChoice::Tethering => false,
+    }
 }
 
 impl Default for Options {
@@ -48,6 +75,7 @@ impl Default for Options {
             drive: DriveChoice::Auto,
             read_only: false,
             hide_dotfiles: true,
+            link: LinkChoice::Auto,
         }
     }
 }
@@ -138,8 +166,14 @@ pub fn speed_advice(speed: UsbSpeed) -> Option<String> {
     ))
 }
 
-/// Whether an Android phone is plugged in, whether in its normal identity or Accessory Mode.
-pub fn phone_present() -> bool {
+/// Whether a phone is plugged in that `link` can reach: in its normal identity, in Accessory Mode, or sharing its connection.
+pub fn phone_present(link: LinkChoice) -> bool {
+    let tethered = tether::phone_address().is_some();
+    match link {
+        LinkChoice::Tethering => return tethered,
+        LinkChoice::Auto if tethered => return true,
+        _ => {}
+    }
     let Ok(context) = Context::new() else {
         return false;
     };
@@ -162,6 +196,24 @@ pub fn run(options: &Options, stop: &Stop, on_event: &dyn Fn(Event)) -> Ended {
     }
 }
 
+/// A phone that's linked and answering, but not mounted.
+pub struct Connected {
+    pub phone: PhoneClient,
+    pub device_name: String,
+}
+
+/// Connect to the phone without mounting it, for tools like `windows-daemon bench`.
+pub fn connect(
+    link: LinkChoice,
+    stop: &Stop,
+    on_event: &dyn Fn(Event),
+) -> Result<Connected, Ended> {
+    match connect_phone(link, stop, on_event) {
+        Ok(connected) => connected,
+        Err(e) => Err(failed(format!("USB error: {e}"))),
+    }
+}
+
 /// Print why a connection failed, and say so to the caller.
 fn failed(why: impl Into<String>) -> Ended {
     let why = why.into();
@@ -174,86 +226,148 @@ fn connect_and_serve(
     stop: &Stop,
     on_event: &dyn Fn(Event),
 ) -> rusb::Result<Ended> {
+    Ok(match connect_phone(options.link, stop, on_event)? {
+        Ok(Connected { phone, device_name }) => serve(phone, &device_name, options, stop, on_event),
+        Err(ended) => ended,
+    })
+}
+
+/// Driver swap, handshake, opening the accessory, and waiting for the phone app to answer.
+fn connect_phone(
+    link: LinkChoice,
+    stop: &Stop,
+    on_event: &dyn Fn(Event),
+) -> rusb::Result<Result<Connected, Ended>> {
     log::info!("Scanning for an Android device...");
     on_event(Event::Connecting);
 
-    let phone = {
-        let context = Context::new()?;
-        match find_android_device(&context)? {
-            Some(device) => {
-                let desc = device.device_descriptor()?;
-                Some((desc.vendor_id(), desc.product_id()))
-            }
-            None => None,
-        }
+    // Before USB: the AOA handshake would take the phone out of tethering.
+    let tethered = match link {
+        LinkChoice::DirectUsb => None,
+        LinkChoice::Auto | LinkChoice::Tethering => tether::phone_address(),
     };
+    if link == LinkChoice::Tethering && tethered.is_none() {
+        return Ok(Err(failed(
+            "USB tethering isn't on. Turn it on in the phone's Hotspot & Tethering settings.",
+        )));
+    }
+    if let Some(addr) = tethered {
+        log::info!(
+            "Found a phone sharing its connection over USB (at {}).",
+            addr.ip()
+        );
+        let Some(stream) = connect_tethered(addr, stop, on_event) else {
+            return Ok(Err(if stop.requested() {
+                Ended::Stopped
+            } else {
+                Ended::PhoneLost
+            }));
+        };
+        let phone = match PhoneClient::over_tcp(stream) {
+            Ok(phone) => phone,
+            Err(e) => return Ok(Err(failed(format!("Couldn't set up the link: {e}")))),
+        };
+        log::info!("⚡ Connected over USB tethering.");
+        return Ok(answering(phone, stop, on_event));
+    }
 
     // Push the phone into AOA mode
-    match phone {
-        Some((vid, pid)) => {
+    match find_phone(stop, FIND_PHONE_TIMEOUT)? {
+        Some(Found::Normal(vid, pid)) => {
             log::info!("Found Android device. Sending AOA Handshake...");
-            handshake_with_driver_swap(vid, pid)?;
+            if let Err(why) = handshake_with_driver_swap(vid, pid)? {
+                return Ok(Err(failed(why)));
+            }
         }
-        None => log::info!("No Android devices found (or it's already in Accessory Mode)."),
+        Some(Found::Accessory) => log::info!("Found the phone, already in Accessory Mode."),
+        None if stop.requested() => return Ok(Err(Ended::Stopped)),
+        None => return Ok(Err(failed("No Android phone found. Is it plugged in?"))),
     }
 
     // Wait for the phone to come back as the accessory, and have the service bind it to WinUSB
     let Some(aoa_instance) = driver::wait_for_device(&aoa_identities(), Duration::from_secs(10))
     else {
-        return Ok(failed(
+        return Ok(Err(failed(
             "The phone didn't switch to Accessory Mode. Was its prompt dismissed?",
-        ));
+        )));
     };
     match send(&Request::EnsureWinusb {
         instance_id: aoa_instance.clone(),
     }) {
         Ok(Response::Ok { detail }) => log::info!("Accessory on WinUSB: {detail}"),
         Ok(Response::Err { message }) => {
-            return Ok(failed(format!(
+            return Ok(Err(failed(format!(
                 "Couldn't bind the accessory to WinUSB: {message}"
-            )));
+            ))));
         }
         Ok(_) | Err(_) => {
-            return Ok(failed(
+            return Ok(Err(failed(
                 "Lost contact with the driver service while binding the accessory.",
-            ));
+            )));
         }
     }
 
     // Find accessory mode device
     let context = Context::new()?;
     let Some(handle) = wait_for_aoa_device(&context, Duration::from_secs(10))? else {
-        return Ok(failed(
+        return Ok(Err(failed(
             "Couldn't open the phone in Accessory Mode, even after binding it to WinUSB.",
-        ));
+        )));
     };
     log::info!("Accessory Mode device found and opened!");
 
     let Some((interface_num, bulk_out_ep, bulk_in_ep)) = find_aoa_endpoints(&handle.device())?
     else {
-        return Ok(failed(
+        return Ok(Err(failed(
             "The phone's Accessory Mode device has no usable bulk endpoints.",
-        ));
+        )));
     };
     handle.claim_interface(interface_num)?;
     log::info!("Pipes established! OUT: 0x{bulk_out_ep:02x}, IN: 0x{bulk_in_ep:02x}");
 
     let phone = PhoneClient::start(handle, interface_num, bulk_out_ep, bulk_in_ep);
-
-    // Prove the link works before mounting anything.
-    let device_name = match wait_for_app(&phone, stop, on_event) {
-        Some(name) => name,
-        None if stop.requested() => return Ok(Ended::Stopped),
-        None => return Ok(Ended::PhoneLost),
-    };
-    log::info!("🏓 Phone responded to Ping! USB bridge is active.");
     let speed = phone.usb_speed();
     log::info!("⚡ Connected over {}.", speed_name(speed));
     if let Some(advice) = speed_advice(speed) {
         log::warn!("🐢 {advice}");
     }
+    Ok(answering(phone, stop, on_event))
+}
 
-    Ok(serve(phone, &device_name, options, stop, on_event))
+/// Prove the link works before mounting anything.
+fn answering(
+    phone: PhoneClient,
+    stop: &Stop,
+    on_event: &dyn Fn(Event),
+) -> Result<Connected, Ended> {
+    match wait_for_app(&phone, stop, on_event) {
+        Some(device_name) => {
+            log::info!("🏓 Phone responded to Ping! The link is active.");
+            Ok(Connected { phone, device_name })
+        }
+        None if stop.requested() => Err(Ended::Stopped),
+        None => Err(Ended::PhoneLost),
+    }
+}
+
+/// Connect to the phone app over the tethering link, waiting for it to be opened. `None` if stopped, or if tethering ends first.
+fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<TcpStream> {
+    let mut asked = false;
+    loop {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            Ok(stream) => return Some(stream),
+            Err(e) if !asked => {
+                asked = true;
+                log::info!("📱 Waiting for the WinDroidFS app on the phone ({e}).");
+                log::info!("   -> Open it on the phone (and update it if it's an older build).");
+                on_event(Event::WaitingForApp);
+            }
+            Err(_) => {}
+        }
+        if stop.sleep(Duration::from_secs(1)) || tether::phone_address() != Some(addr) {
+            return None;
+        }
+    }
 }
 
 /// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
@@ -409,37 +523,88 @@ fn mount_webdav(
     ended
 }
 
-fn handshake_with_driver_swap(vid: u16, pid: u16) -> rusb::Result<()> {
-    let Some(instance_id) = driver::find_connected_device(vid, pid) else {
-        log::error!("❌ Found {vid:04X}:{pid:04X} over USB, but not in Windows' device list.");
-        return Ok(());
-    };
+/// The phone's identity on the bus.
+enum Found {
+    Normal(u16, u16),
+    Accessory,
+}
 
-    match send(&Request::BeginSwap {
-        instance_id: instance_id.clone(),
-    }) {
-        Ok(Response::Ok { detail }) => log::info!("🔧 {detail}"),
-        Ok(Response::Err { message }) => {
-            log::error!("❌ Could not switch {instance_id} to WinUSB: {message}");
-            return Ok(());
+/// Look for the phone until `timeout`. `None` if it never shows up, or if stopped.
+fn find_phone(stop: &Stop, timeout: Duration) -> rusb::Result<Option<Found>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let context = Context::new()?;
+        for device in context.devices()?.iter() {
+            let desc = device.device_descriptor()?;
+            let (vid, pid) = (desc.vendor_id(), desc.product_id());
+            if is_normal_android_identity(vid, pid) {
+                return Ok(Some(Found::Normal(vid, pid)));
+            }
+            if is_aoa_identity(vid, pid) {
+                return Ok(Some(Found::Accessory));
+            }
         }
-        Ok(_) | Err(_) => {
-            log::error!("❌ Lost contact with the driver service before the swap.");
-            return Ok(());
+        if Instant::now() >= deadline || stop.sleep(Duration::from_millis(250)) {
+            return Ok(None);
         }
     }
+}
 
-    let handshake_sent = handshake_with_retries(vid, pid, Duration::from_secs(20))?;
+/// Swap the phone onto WinUSB, send the AOA handshake, then put its driver back. `Err` says why for the user.
+fn handshake_with_driver_swap(vid: u16, pid: u16) -> rusb::Result<Result<(), String>> {
+    let mut attempt = 1;
+    let instance_id = loop {
+        let Some(instance_id) = driver::find_connected_device(vid, pid) else {
+            return Ok(Err(format!(
+                "Found {vid:04X}:{pid:04X} over USB, but not in Windows' device list."
+            )));
+        };
+        match send(&Request::BeginSwap {
+            instance_id: instance_id.clone(),
+        }) {
+            Ok(Response::Ok { detail }) => {
+                log::info!("🔧 {detail}");
+                break instance_id;
+            }
+            Ok(Response::Err { message }) => {
+                // A failed swap can still leave WinUSB installed, and the journal knows what to put back.
+                rollback_driver(&instance_id);
+                if attempt == SWAP_ATTEMPTS {
+                    return Ok(Err(format!(
+                        "Could not switch {instance_id} to WinUSB: {message}"
+                    )));
+                }
+                log::warn!("⚠️  Could not switch {instance_id} to WinUSB ({message}). Retrying...");
+                attempt += 1;
+                sleep(Duration::from_secs(2));
+            }
+            Ok(_) | Err(_) => {
+                return Ok(Err(
+                    "Lost contact with the driver service before the swap.".to_string()
+                ));
+            }
+        }
+    };
 
-    if handshake_sent {
+    let handshake = handshake_with_retries(vid, pid, Duration::from_secs(20))?;
+    if handshake.is_ok() {
         log::info!("Handshake successful. Waiting for phone to reconnect in Accessory Mode...");
         if !driver::wait_until_disconnected(&instance_id, Duration::from_secs(10)) {
             log::warn!("⚠️  The phone kept its normal identity; restoring its driver anyway.");
         }
     }
+    rollback_driver(&instance_id);
+    Ok(handshake.map_err(|problem| {
+        format!(
+            "The phone never accepted the AOA handshake ({problem}). Unlock the screen and leave it on, then try again."
+        )
+    }))
+}
 
+/// Put the phone's own driver back after a swap.
+fn rollback_driver(instance_id: &str) {
     match send(&Request::Rollback {
-        instance_id: instance_id.clone(),
+        instance_id: instance_id.to_string(),
     }) {
         Ok(Response::Ok { detail }) => {
             log::info!("↩️  Restored original driver for {instance_id}: {detail}")
@@ -451,18 +616,6 @@ fn handshake_with_driver_swap(vid: u16, pid: u16) -> rusb::Result<()> {
             "⚠️  Lost contact with the driver service during rollback.\n   -> The service will finish it from its journal, or run `windows-daemon restore-drivers`."
         ),
     }
-    Ok(())
-}
-
-fn find_android_device(context: &Context) -> rusb::Result<Option<Device<Context>>> {
-    let devices = context.devices()?;
-    for device in devices.iter() {
-        let desc = device.device_descriptor()?;
-        if is_normal_android_identity(desc.vendor_id(), desc.product_id()) {
-            return Ok(Some(device));
-        }
-    }
-    Ok(None)
 }
 
 fn find_device(context: &Context, vid: u16, pid: u16) -> rusb::Result<Option<Device<Context>>> {
@@ -475,8 +628,12 @@ fn find_device(context: &Context, vid: u16, pid: u16) -> rusb::Result<Option<Dev
     Ok(None)
 }
 
-/// Keep attempting the AOA handshake until it takes or `timeout` runs out.
-fn handshake_with_retries(vid: u16, pid: u16, timeout: Duration) -> rusb::Result<bool> {
+/// Keep attempting the AOA handshake until it takes or `timeout` runs out. `Err` is the last problem seen.
+fn handshake_with_retries(
+    vid: u16,
+    pid: u16,
+    timeout: Duration,
+) -> rusb::Result<Result<(), String>> {
     let deadline = Instant::now() + timeout;
     let mut last_problem;
 
@@ -490,14 +647,12 @@ fn handshake_with_retries(vid: u16, pid: u16, timeout: Duration) -> rusb::Result
         };
 
         match attempt {
-            Attempt::Started => return Ok(true),
+            Attempt::Started => return Ok(Ok(())),
             Attempt::NotReady(why) => last_problem = why,
         }
 
         if Instant::now() >= deadline {
-            log::error!("❌ The phone never accepted the AOA handshake: {last_problem}");
-            log::info!("   -> Unlock the screen and leave it on, then try again.");
-            return Ok(false);
+            return Ok(Err(last_problem));
         }
         sleep(Duration::from_millis(500));
     }

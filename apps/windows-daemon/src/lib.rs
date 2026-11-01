@@ -5,6 +5,7 @@ pub mod ipc;
 pub mod logging;
 pub mod phone;
 pub mod session;
+pub mod tether;
 pub mod usb_watch;
 pub mod webdav;
 pub mod winfsp_fs;

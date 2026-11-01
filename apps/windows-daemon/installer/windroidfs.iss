@@ -3,6 +3,8 @@
 ; Builds a single setup.exe that:
 ;   - installs the executables into Program Files,
 ;   - registers the privileged driver service (runs as SYSTEM, starts at boot),
+;   - installs WinFsp, unless it's already there (the drive needs it; without it WinDroidFS
+;     falls back to a read-only WebDAV mount),
 ;   - starts the tray app (windroidfs.exe), which adds itself to "Start with Windows" on its
 ;     first run,
 ;   - restores drivers and removes the service on uninstall.
@@ -13,6 +15,8 @@
 ; This script expects the release binaries to exist already:
 ;   cargo build --release
 ; which produces target\release\windroidfs.exe, windows-daemon.exe and windroidfs-service.exe.
+; It also expects WinFsp's official installer in installer\deps\, named as WinFspMsi below
+; (from https://winfsp.dev/rel/). WinFsp's FLOSS exception allows bundling it only unmodified.
 
 #define AppName "WinDroidFS"
 #define AppVersion "0.1.0"
@@ -20,6 +24,7 @@
 #define ServiceExe "windroidfs-service.exe"
 #define DaemonExe "windows-daemon.exe"
 #define TrayExe "windroidfs.exe"
+#define WinFspMsi "winfsp-2.1.25156.msi"
 
 [Setup]
 ; A real GUID, generated once. Windows identifies the installed product by this, so upgrades
@@ -48,6 +53,8 @@ WizardStyle=modern
 Source: "..\target\release\{#ServiceExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\{#DaemonExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\{#TrayExe}"; DestDir: "{app}"; Flags: ignoreversion
+; Only unpacked when needed, and removed again once installed.
+Source: "deps\{#WinFspMsi}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWinFsp
 
 [Icons]
 ; AppUserModelID is what lets the app show notifications: Windows only shows toasts from an
@@ -56,6 +63,8 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#TrayExe}"; AppUserModelID: "Wilso
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 
 [Run]
+; Silent, under the elevation setup already has. Left installed on uninstall: other apps may use it.
+Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qn /norestart"; Flags: runhidden waituntilterminated; StatusMsg: "Installing WinFsp..."; Check: NeedsWinFsp
 ; After copying files, register and start the service. The service exe does the actual
 ; ServiceManager work (see its `install` command), so the installer just invokes it.
 Filename: "{app}\{#ServiceExe}"; Parameters: "install"; Flags: runhidden waituntilterminated; StatusMsg: "Registering the WinDroidFS driver service..."
@@ -76,6 +85,15 @@ Filename: "{app}\{#ServiceExe}"; Parameters: "uninstall"; Flags: runhidden waitu
 Type: filesandordirs; Name: "{commonappdata}\{#AppName}"
 
 [Code]
+// WinFsp records its install folder here (32-bit view, whatever the OS).
+function NeedsWinFsp: Boolean;
+var
+  InstallDir: String;
+begin
+  Result := not (RegQueryStringValue(HKLM32, 'SOFTWARE\WinFsp', 'InstallDir', InstallDir)
+                 and DirExists(InstallDir));
+end;
+
 // Stop the service before copying files over it.
 //
 // Without this, reinstalling or upgrading fails: the running windroidfs-service.exe is locked

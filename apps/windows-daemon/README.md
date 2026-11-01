@@ -49,11 +49,15 @@ tray icon whose tooltip and menu say what's happening ("Wilson's S25+ is mounted
 click opens the drive. The menu has:
 
 - **Mount phones when plugged in**: the on/off switch. Off leaves phones alone, so MTP works.
+- **Connect over**: automatic (USB tethering if it's on, otherwise Direct USB), Direct USB
+  only, or USB tethering only. Tethering only never switches the phone into Accessory Mode, so
+  there's time to turn tethering on after plugging in.
 - **Drive letter**: automatic (first free from Z: down), or a fixed letter. A taken letter
   falls back to automatic. Changing it while mounted remounts straight away.
 - **Options**: open in Explorer when mounted; read-only; hide dot-files.
 - **Troubleshooting**: use WebDAV instead of WinFsp; keep a log; open the log folder.
 - **Start with Windows**: on by default after the first run of a release build.
+- **About WinDroidFS**: the version, and the WinFsp notice its licence requires.
 
 Settings live in `%APPDATA%\WinDroidFS\settings.ini`, one `key=value` per line, every one of
 them also in the menu. (Except "Start with Windows", which is the registry's `Run` entry, so
@@ -168,6 +172,8 @@ cargo run --bin windroidfs
 | `windroidfs` | The tray app. |
 | `windows-daemon` | Console run: handshake, then mount the phone (WinFsp, else WebDAV). |
 | `windows-daemon --webdav` | Same, but always use the WebDAV mount. |
+| `windows-daemon --tethering` / `--direct-usb` | Same, but only over USB tethering, or only over Direct USB (Accessory Mode). Also work with `bench`. |
+| `windows-daemon bench [MiB]` | Connect without mounting and measure ping time, then write and read speed with a temporary file on the phone (128 MiB by default). |
 | `windows-daemon restore-drivers` | Undo every driver swap (asks the service). |
 | `windroidfs-service run` | Foreground service, for development. |
 | `windroidfs-service install` | Register and start the service. |
@@ -200,15 +206,32 @@ cargo test mounts_and_serves -- --ignored --nocapture
 
 ## Building the installer
 
-Needs [Inno Setup 6](https://jrsoftware.org/isdl.php).
+Needs [Inno Setup 6](https://jrsoftware.org/isdl.php), and WinFsp's official installer from
+[winfsp.dev/rel](https://winfsp.dev/rel/) saved as `installer\deps\winfsp-2.1.25156.msi` (the name
+is `WinFspMsi` in the script; `deps\` is git-ignored).
 
 ```bash
 cargo build --release
 iscc installer\windroidfs.iss
 ```
 
-The result lands in `dist\`. Installing asks for Administrator once, registers the service to
-start at boot, and uninstalling restores any swapped drivers before removing the service.
+The result lands in `dist\`. Installing asks for Administrator once, installs WinFsp if it isn't
+there already, and registers the service to start at boot. Uninstalling restores any swapped
+drivers before removing the service, and leaves WinFsp, which other apps may use.
+
+## Licensing
+
+WinFsp's installer is bundled under its FLOSS exception, which requires that it is unmodified,
+that WinDroidFS stays under an open-source licence and is never shipped with proprietary
+software, and that this notice and link appear in the UI (the tray's **About WinDroidFS**) and
+in user-facing docs:
+
+> WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
+> https://github.com/winfsp/winfsp
+
+The Rust bindings (`winfsp` and `winfsp-sys` crates) are plain GPL-3.0, with no such exception.
+They're compiled into the executables, so the binaries are GPL-3.0 whatever licence the source
+carries.
 
 ## The app icon
 

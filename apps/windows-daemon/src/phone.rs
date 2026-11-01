@@ -1,3 +1,5 @@
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -19,7 +21,7 @@ use crate::windroid::{
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// After this long with no requests, the USB thread pings the phone to check it's still there
+/// After this long with no requests, the link thread pings the phone to check it's still there
 const HEARTBEAT_AFTER: Duration = Duration::from_secs(3);
 
 /// How long a health-check ping may take. A ping is answered straight away by a phone that's alive, so this can be much shorter than [`REPLY_TIMEOUT`]
@@ -83,26 +85,41 @@ pub struct PhoneClient {
 }
 
 impl PhoneClient {
-    /// Take ownership of the opened accessory and start the USB thread
+    /// Take ownership of the opened accessory and start the link thread
     /// The thread runs until every clone of the returned client has been dropped, then releases the interface
     pub fn start(handle: DeviceHandle<Context>, interface: u8, out_ep: u8, in_ep: u8) -> Self {
-        let (tx, rx) = mpsc::channel::<UsbJob>();
-        let alive = Arc::new(AtomicBool::new(true));
         let speed = usb_speed(handle.device().speed());
-        let link = Link {
-            speed,
+        let usb = Usb {
             handle,
+            interface,
             out_ep,
             in_ep,
+        };
+        Self::spawn(Box::new(usb), speed)
+    }
+
+    /// The same, over a socket to the phone (USB tethering). The link speed isn't known.
+    pub fn over_tcp(stream: TcpStream) -> io::Result<Self> {
+        // Each request waits for its reply, so don't let Nagle hold them back.
+        stream.set_nodelay(true)?;
+        Ok(Self::spawn(Box::new(Tcp(stream)), UsbSpeed::Unknown))
+    }
+
+    fn spawn(transport: Box<dyn Transport>, speed: UsbSpeed) -> Self {
+        let (tx, rx) = mpsc::channel::<UsbJob>();
+        let alive = Arc::new(AtomicBool::new(true));
+        let link = Link {
+            speed,
+            transport,
             inbox: Vec::new(),
             scratch: vec![0u8; READ_CHUNK],
             next_id: 0,
         };
         let thread_alive = alive.clone();
         thread::Builder::new()
-            .name("windroid-usb".into())
-            .spawn(move || usb_thread(link, interface, rx, &thread_alive))
-            .expect("failed to start the USB thread");
+            .name("windroid-link".into())
+            .spawn(move || link_thread(link, rx, &thread_alive))
+            .expect("failed to start the link thread");
         PhoneClient { tx, speed, alive }
     }
 
@@ -326,19 +343,85 @@ fn ping(speed: UsbSpeed) -> Ping {
     }
 }
 
-/// The opened accessory plus the state that has to survive between requests
-struct Link {
-    speed: UsbSpeed,
+/// The pipe the frames travel through: the accessory's bulk endpoints, or a socket.
+trait Transport: Send {
+    fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError>;
+    /// Whatever arrives within `timeout`. 0 means nothing has yet.
+    fn receive(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, PhoneError>;
+    fn close(&mut self);
+}
+
+struct Usb {
     handle: DeviceHandle<Context>,
+    interface: u8,
     out_ep: u8,
     in_ep: u8,
+}
+
+impl Transport for Usb {
+    fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError> {
+        self.handle
+            .write_bulk(self.out_ep, bytes, timeout)
+            .map(|_| ())
+            .map_err(usb_error)
+    }
+
+    fn receive(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, PhoneError> {
+        match self.handle.read_bulk(self.in_ep, buf, timeout) {
+            Ok(n) => Ok(n),
+            Err(rusb::Error::Timeout) => Ok(0),
+            Err(e) => Err(usb_error(e)),
+        }
+    }
+
+    fn close(&mut self) {
+        let _ = self.handle.release_interface(self.interface);
+    }
+}
+
+struct Tcp(TcpStream);
+
+impl Transport for Tcp {
+    fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError> {
+        self.0.set_write_timeout(Some(timeout)).map_err(tcp_error)?;
+        self.0.write_all(bytes).map_err(tcp_error)
+    }
+
+    fn receive(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, PhoneError> {
+        // A zero timeout means "wait forever" to a socket.
+        let timeout = timeout.max(Duration::from_millis(1));
+        self.0.set_read_timeout(Some(timeout)).map_err(tcp_error)?;
+        match self.0.read(buf) {
+            Ok(0) => Err(PhoneError::Disconnected),
+            Ok(n) => Ok(n),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(0)
+            }
+            Err(e) => Err(tcp_error(e)),
+        }
+    }
+
+    fn close(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+/// The open link plus the state that has to survive between requests
+struct Link {
+    speed: UsbSpeed,
+    transport: Box<dyn Transport>,
     /// Bytes read from the phone that don't yet make up a whole frame. Kept across requests.
     inbox: Vec<u8>,
     scratch: Vec<u8>,
     next_id: u32,
 }
 
-fn usb_thread(mut link: Link, interface: u8, rx: mpsc::Receiver<UsbJob>, alive: &AtomicBool) {
+fn link_thread(mut link: Link, rx: mpsc::Receiver<UsbJob>, alive: &AtomicBool) {
     let mut established = false;
 
     loop {
@@ -371,7 +454,7 @@ fn usb_thread(mut link: Link, interface: u8, rx: mpsc::Receiver<UsbJob>, alive: 
 
     // From here on every request fails at once (see `PhoneClient::call`). Queued jobs will also fail.
     alive.store(false, Ordering::SeqCst);
-    let _ = link.handle.release_interface(interface);
+    link.transport.close();
 }
 
 impl Link {
@@ -390,9 +473,7 @@ impl Link {
             payload: Some(payload),
         };
         exchange(
-            &self.handle,
-            self.out_ep,
-            self.in_ep,
+            self.transport.as_mut(),
             &request,
             &mut self.inbox,
             &mut self.scratch,
@@ -403,9 +484,7 @@ impl Link {
 
 /// Send `request` and wait up to `timeout` for the reply carrying the same `request_id`
 fn exchange(
-    handle: &DeviceHandle<Context>,
-    out_ep: u8,
-    in_ep: u8,
+    transport: &mut dyn Transport,
     request: &Packet,
     inbox: &mut Vec<u8>,
     scratch: &mut [u8],
@@ -413,9 +492,7 @@ fn exchange(
 ) -> Result<Payload, PhoneError> {
     // Header and payload go out in one write, so they arrive as one transfer
     let framed = frame::encode(&request.encode_to_vec());
-    handle
-        .write_bulk(out_ep, &framed, WRITE_TIMEOUT.min(timeout))
-        .map_err(usb_error)?;
+    transport.send(&framed, WRITE_TIMEOUT.min(timeout))?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -434,7 +511,7 @@ fn exchange(
                     Err(e) => log::warn!("⚠️  Dropped an unreadable message from the phone: {e}"),
                 },
                 Frame::Skipped(n) => {
-                    log::warn!("⚠️  Skipped {n} corrupt bytes on the USB link while resyncing.")
+                    log::warn!("⚠️  Skipped {n} corrupt bytes on the link while resyncing.")
                 }
                 Frame::Incomplete => break,
             }
@@ -451,11 +528,8 @@ fn exchange(
 
         // A timeout here just means nothing more has arrived yet: keep what's buffered and go round again until the deadline.
         // Throwing partial data away is what used to leave the 2 sides permanently out of step.
-        match handle.read_bulk(in_ep, scratch, deadline - now) {
-            Ok(n) => inbox.extend_from_slice(&scratch[..n]),
-            Err(rusb::Error::Timeout) => {}
-            Err(e) => return Err(usb_error(e)),
-        }
+        let n = transport.receive(scratch, deadline - now)?;
+        inbox.extend_from_slice(&scratch[..n]);
     }
 }
 
@@ -463,6 +537,17 @@ fn usb_error(e: rusb::Error) -> PhoneError {
     match e {
         rusb::Error::NoDevice | rusb::Error::NotFound | rusb::Error::Io => PhoneError::Disconnected,
         other => PhoneError::Transport(format!("USB error: {other}")),
+    }
+}
+
+fn tcp_error(e: io::Error) -> PhoneError {
+    match e.kind() {
+        io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe
+        | io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::NotConnected => PhoneError::Disconnected,
+        _ => PhoneError::Transport(format!("network error: {e}")),
     }
 }
 

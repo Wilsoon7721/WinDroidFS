@@ -211,9 +211,9 @@ private fun AdbSetupContent(onOpenDeveloperOptions: () -> Unit) {
 @Composable
 private fun TetheringSetupContent(port: Int, onOpenTetheringSettings: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SetupStep(1, "Plug your phone into the PC with a USB cable.")
-        SetupStep(2, "Turn on USB Tethering in Hotspot & Tethering settings.")
-        SetupStep(3, "WinDroidFS will listen on port $port.")
+        SetupStep(1, "On the PC, set WinDroidFS's tray menu to Connect over → USB tethering only.")
+        SetupStep(2, "Plug your phone into the PC with a USB cable.")
+        SetupStep(3, "Turn on USB Tethering in Hotspot & Tethering settings and keep this app open. It listens on port $port.")
         SetupActionButton(text = "Open Tethering Settings", onClick = onOpenTetheringSettings)
     }
 }
@@ -295,11 +295,7 @@ private fun ActiveDashboard(session: ActiveSession, onTerminateClick: () -> Unit
 private fun ProtocolBanner(session: ActiveSession) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(WinDroidTheme.colors.success.copy(alpha = 0.12f))
-            .padding(20.dp)
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(WinDroidTheme.colors.success.copy(alpha = 0.12f)).padding(20.dp)
     ) {
         StatusDot(color = WinDroidTheme.colors.success, size = 12.dp)
         Spacer(modifier = Modifier.width(14.dp))
@@ -396,7 +392,7 @@ private fun SessionTotalCard(totalBytes: Long) {
     }
 }
 
-// File name + progress bar for whatever is being written right now.
+// File name + progress bar for whatever is being written
 @Composable
 private fun CurrentTransferCard(transfer: TransferInProgress) {
     val progress = if (transfer.bytesTotal > 0) transfer.bytesDone.toFloat() / transfer.bytesTotal else 0f

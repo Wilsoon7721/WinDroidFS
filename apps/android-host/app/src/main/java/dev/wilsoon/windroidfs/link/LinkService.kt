@@ -30,6 +30,11 @@ import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -38,12 +43,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** What the dashboard shows about a live link. */
 data class LinkStatus(
-    /** The PC's name, from its pings. Empty until the first one arrives. */
     val hostName: String,
-    val connectedAtMs: Long,
-    /** Per second, from the PC's point of view. */
+    val transport: LinkTransport,
+    val waitingForPc: Boolean,
+    val uptimeSeconds: Long,
+    /* From PC view */
     val readBytesPerSecond: Long,
     val writeBytesPerSecond: Long,
     val totalBytes: Long,
@@ -51,7 +56,7 @@ data class LinkStatus(
     val usbSpeed: UsbSpeed,
 )
 
-/** The live link's status for the UI. Null while there is no link. */
+/** The live link's status for the UI, null when no link */
 object LinkState {
     private val mutableStatus = MutableStateFlow<LinkStatus?>(null)
     val status: StateFlow<LinkStatus?> = mutableStatus.asStateFlow()
@@ -61,9 +66,13 @@ object LinkState {
     }
 }
 
-/** Owns the USB link to the PC. A foreground service, so it survives the app being swiped away. */
+/** Foreground service for USB link */
 class LinkService : Service() {
     private var accessoryFd: ParcelFileDescriptor? = null
+    @Volatile private var listener: ServerSocket? = null
+    @Volatile private var socket: Socket? = null
+    @Volatile private var transport = LinkTransport.ACCESSORY
+    private var tetherAddress: InetAddress? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var ticker: ScheduledExecutorService? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -81,6 +90,7 @@ class LinkService : Service() {
     // For the watchdog in publishStatus
     @Volatile private var lastActivityMs = 0L
     @Volatile private var handlingRequest = false
+    @Volatile private var pcSeen = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -97,11 +107,12 @@ class LinkService : Service() {
         }
         if (running) return START_NOT_STICKY
 
-        val accessory = intent?.accessoryExtra()
-        if (accessory == null || !open(accessory)) {
-            stopSelf()
-            return START_NOT_STICKY
+        val opened = if (intent?.action == ACTION_TETHER) {
+            listen()
+        } else {
+            intent?.accessoryExtra()?.let(::open) ?: false
         }
+        if (!opened) stopSelf()
         return START_NOT_STICKY
     }
 
@@ -112,6 +123,12 @@ class LinkService : Service() {
         } catch (_: IOException) {
         }
         accessoryFd = null
+        // Unblocks accept() and read() on the link thread
+        try {
+            listener?.close()
+            socket?.close()
+        } catch (_: IOException) {
+        }
         ticker?.shutdownNow()
         ticker = null
         try {
@@ -133,42 +150,69 @@ class LinkService : Service() {
         } ?: return false
 
         accessoryFd = fd
-        running = true
-        connectedAtMs = System.currentTimeMillis()
-        lastActivityMs = connectedAtMs
-        bytesRead.set(0)
-        bytesWritten.set(0)
-
         ContextCompat.registerReceiver(
             this,
             detachReceiver,
             IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-
-        // Charging over the same cable anyway; a sleeping CPU would stall transfers.
-        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WinDroidFS:link")
-            .apply { acquire() }
-
-        Thread({ serve(fd) }, "windroid-usb").start()
-        ticker = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleWithFixedDelay(::publishStatus, 0, 1, TimeUnit.SECONDS)
+        begin(LinkTransport.ACCESSORY) {
+            serve(FileInputStream(fd.fileDescriptor), FileOutputStream(fd.fileDescriptor))
         }
-        Log.d(TAG, "Linked to the PC")
         return true
     }
 
-    private fun serve(fd: ParcelFileDescriptor) {
-        val input = FileInputStream(fd.fileDescriptor)
-        val output = FileOutputStream(fd.fileDescriptor)
+    /** Wait for the PC on the USB tethering link. One PC at a time: the listener closes once it's in */
+    private fun listen(): Boolean {
+        val address = Tethering.address() ?: return false
+        val server = try {
+            ServerSocket(Tethering.PORT, 1, address)
+        } catch (e: IOException) {
+            Log.e(TAG, "Couldn't listen on $address", e)
+            return false
+        }
+        listener = server
+        tetherAddress = address
+        begin(LinkTransport.TETHERING) {
+            val client = try {
+                server.accept()
+            } catch (e: IOException) {
+                Log.i(TAG, "Stopped listening: ${e.message}")
+                mainHandler.post { stopSelf() }
+                return@begin
+            } finally {
+                try {
+                    server.close()
+                } catch (_: IOException) {
+                }
+            }
+            socket = client
+            client.tcpNoDelay = true
+            serve(client.getInputStream(), client.getOutputStream())
+        }
+        return true
+    }
+
+    private fun begin(how: LinkTransport, link: () -> Unit) {
+        transport = how
+        running = true
+        pcSeen = false
+        bytesRead.set(0)
+        bytesWritten.set(0)
+        Thread(link, "windroid-link").start()
+        ticker = Executors.newSingleThreadScheduledExecutor().apply {
+            scheduleWithFixedDelay(::publishStatus, 0, 1, TimeUnit.SECONDS)
+        }
+        Log.d(TAG, "Waiting for the PC over $how")
+    }
+
+    private fun serve(input: InputStream, output: OutputStream) {
         val frames = FrameReader()
         val fileServer = FileServer(deviceName = deviceName(), onFileChanged = { file ->
             MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
         })
         server = fileServer
 
-        // At least the accessory's 16 KiB transfer size.
         val buffer = ByteArray(16 * 1024)
 
         var pcSaidGoodbye = false
@@ -188,12 +232,13 @@ class LinkService : Service() {
                         Log.w(TAG, "Dropped an unreadable message: ${e.message}")
                         continue
                     }
+                    if (!pcSeen) pcFound()
                     if (request.hasPing()) {
                         if (request.ping.hostName.isNotEmpty()) hostName = request.ping.hostName
                         usbSpeed = request.ping.usbSpeed
                     }
 
-                    // A bug in one request must not take down the link: reply with just the id.
+                    // A bug in one request should not crash - reply with just the ID.
                     handlingRequest = true
                     val reply = try {
                         fileServer.handle(request)
@@ -235,16 +280,46 @@ class LinkService : Service() {
         mainHandler.post { stopSelf() }
     }
 
+    /** The accessory stays open after the PC leaves */
+    private fun pcFound() {
+        connectedAtMs = System.currentTimeMillis()
+        lastActivityMs = connectedAtMs
+        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WinDroidFS:link").apply { acquire() }
+        pcSeen = true
+        Log.d(TAG, "The PC answered")
+    }
+
     private var lastRead = 0L
     private var lastWritten = 0L
-    private var lastNotifiedHost: String? = null
+    private var lastNotifiedHost: String? = null // null while waiting for the PC
 
-    /** Once a second: work out speeds, publish the status, and watch for a silent PC. */
+    /** Once a second: work out speeds, publish the status, and watch for a silent PC */
     private fun publishStatus() {
         if (!running) return
+        if (!pcSeen) {
+            if (transport == LinkTransport.TETHERING && Tethering.address() != tetherAddress) {
+                Log.i(TAG, "USB tethering ended")
+                running = false
+                mainHandler.post { stopSelf() }
+                return
+            }
 
-        // The PC pings even when idle, so silence means it went without a goodbye. The USB
-        // read never fails in that case, as the cable is still fine.
+            LinkState.publish(
+                LinkStatus(
+                    hostName = "",
+                    transport = transport,
+                    waitingForPc = true,
+                    uptimeSeconds = 0,
+                    readBytesPerSecond = 0,
+                    writeBytesPerSecond = 0,
+                    totalBytes = 0,
+                    currentWrite = null,
+                    usbSpeed = UsbSpeed.USB_SPEED_UNKNOWN,
+                ),
+            )
+            return
+        }
+
         val silentFor = System.currentTimeMillis() - lastActivityMs
         if (!handlingRequest && silentFor > PC_SILENCE_TIMEOUT_MS) {
             Log.i(TAG, "No word from the PC for ${silentFor / 1000}s; ending the link")
@@ -257,7 +332,9 @@ class LinkService : Service() {
         LinkState.publish(
             LinkStatus(
                 hostName = hostName,
-                connectedAtMs = connectedAtMs,
+                transport = transport,
+                waitingForPc = false,
+                uptimeSeconds = (System.currentTimeMillis() - connectedAtMs) / 1000,
                 readBytesPerSecond = read - lastRead,
                 writeBytesPerSecond = written - lastWritten,
                 totalBytes = read + written,
@@ -285,7 +362,7 @@ class LinkService : Service() {
 
     private fun enterForeground(): Boolean = try {
         createChannel()
-        val notification = notification(hostName)
+        val notification = notification(null)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -297,7 +374,7 @@ class LinkService : Service() {
         }
         true
     } catch (e: Exception) {
-        // Refused if started from the background (12+) or without the USB permission (14+).
+        // Refused if started from the background (12+) or without the USB permission (14+)
         Log.e(TAG, "Couldn't start as a foreground service", e)
         false
     }
@@ -312,7 +389,8 @@ class LinkService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun notification(host: String): Notification {
+    /** Host is null while waiting for the PC */
+    private fun notification(host: String?): Notification {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -333,8 +411,17 @@ class LinkService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(if (host.isEmpty()) "Connected to your PC" else "Connected to $host")
-            .setContentText("Your phone's storage is mounted on the PC")
+            .setContentTitle(
+                when {
+                    host == null -> "Waiting for your PC"
+                    host.isEmpty() -> "Connected to your PC"
+                    else -> "Connected to $host"
+                },
+            )
+            .setContentText(
+                if (host == null) "Start WinDroidFS on the PC to mount your storage"
+                else "Your phone's storage is mounted on the PC",
+            )
             .setContentIntent(openApp)
             .addAction(
                 Notification.Action.Builder(null, "Disconnect", disconnect).build(),
@@ -343,7 +430,7 @@ class LinkService : Service() {
             .build()
     }
 
-    /** The name set in Settings > About phone, else the model. The PC names the drive after it. */
+    /** The name set in Settings > About phone, else the model. Used for the drive label */
     private fun deviceName(): String {
         val named = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
             Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
@@ -366,14 +453,19 @@ class LinkService : Service() {
         private const val CHANNEL_ID = "link"
         private const val NOTIFICATION_ID = 1
 
-        /** The PC pings every 3s when idle, and one reply can take up to 15s. */
+        /** The PC pings every 3s when idle, 1 reply can take up to 15s */
         private const val PC_SILENCE_TIMEOUT_MS = 20_000L
         private const val ACTION_STOP = "dev.wilsoon.windroidfs.action.DISCONNECT"
+        private const val ACTION_TETHER = "dev.wilsoon.windroidfs.action.TETHER"
 
-        /** Call from the visible activity. */
         fun connect(context: Context, accessory: UsbAccessory) {
-            val intent = Intent(context, LinkService::class.java)
-                .putExtra(UsbManager.EXTRA_ACCESSORY, accessory)
+            val intent = Intent(context, LinkService::class.java).putExtra(UsbManager.EXTRA_ACCESSORY, accessory)
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        /** Call from the visible activity, while `Tethering.address` isn't null. */
+        fun listenOnTethering(context: Context) {
+            val intent = Intent(context, LinkService::class.java).setAction(ACTION_TETHER)
             ContextCompat.startForegroundService(context, intent)
         }
 
