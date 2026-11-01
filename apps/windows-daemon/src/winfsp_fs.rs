@@ -3,8 +3,8 @@ use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
@@ -15,7 +15,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, GetLogicalDrives,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_READONLY, GetLogicalDrives,
 };
 use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
@@ -27,7 +28,9 @@ use winfsp::filesystem::{
 use winfsp::host::{FileSystemHost, VolumeParams};
 use winfsp::{FspError, U16CStr};
 
-use crate::phone::{MAX_READ, MAX_WRITE, PhoneClient, PhoneError};
+use crate::adb::AdbPhone;
+use crate::adb_files::{self, AdbFiles, RESTRICTED_FOLDERS};
+use crate::phone::{self, MAX_READ, MAX_WRITE, PhoneClient, PhoneError, ReadChunk};
 use crate::windroid::{self as proto, ErrorCode};
 
 /// How long a directory listing is trusted. Short, because the phone's files can change while mounted (a new photo, say): a file created on the phone shows up after at most this long.
@@ -127,6 +130,26 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Listed in a restricted folder in place of what Android won't show. Lives on the PC only.
+const NOTICE_NAME: &str = "Why is this folder empty.txt";
+const NOTICE_TEXT: &str = "Android 11 and later keep every app out of Android\\data and Android\\obb, \
+WinDroidFS included, so what's in them can't be shown here.\r\n\r\n\
+To reach them, turn on USB debugging on the phone and choose Connect over > ADB only in WinDroidFS's \
+tray menu: adb is allowed in. Or use Windows' usual phone connection (MTP) by turning off \
+\"Mount phones when plugged in\" and replugging the phone.\r\n\r\n\
+This file isn't on your phone. WinDroidFS shows it in place of the folder's contents.\r\n";
+
+/// Exactly one of [`RESTRICTED_FOLDERS`], not something inside it.
+fn is_restricted(path: &str) -> bool {
+    RESTRICTED_FOLDERS.contains(&path.to_lowercase().as_str())
+}
+
+fn is_notice(path: &str) -> bool {
+    split_parent(path).is_some_and(|(parent, name)| {
+        is_restricted(parent) && name.eq_ignore_ascii_case(NOTICE_NAME)
+    })
+}
+
 /// How to mount the phone
 #[derive(Clone, Debug)]
 pub struct MountOptions {
@@ -137,6 +160,100 @@ pub struct MountOptions {
     pub read_only: bool,
     /// Mark dot-files (`.thumbnails`, `.nomedia`, ...) hidden, as Android and Linux treat them.
     pub hide_dotfiles: bool,
+    /// Reach [`RESTRICTED_FOLDERS`] through adb, on the ADB route.
+    pub adb: Option<AdbPhone>,
+}
+
+/// Where each path's files come from: the phone app, or adb for the folders Android keeps the app out of.
+struct Storage {
+    phone: PhoneClient,
+    adb: Option<AdbFiles>,
+}
+
+impl Storage {
+    fn adb(&self, path: &str) -> Option<&AdbFiles> {
+        self.adb.as_ref().filter(|_| adb_files::is_restricted(path))
+    }
+
+    fn stat(&self, path: &str) -> Result<proto::FileInfo, PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.stat(path),
+            None => self.phone.stat(path),
+        }
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<proto::FileInfo>, PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.list_dir(path),
+            None => self.phone.list_dir(path),
+        }
+    }
+
+    fn read(&self, path: &str, offset: u64, len: u32) -> Result<ReadChunk, PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.read(path, offset, len),
+            None => self.phone.read(path, offset, len),
+        }
+    }
+
+    fn create(&self, path: &str, is_directory: bool) -> Result<proto::FileInfo, PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.create(path, is_directory),
+            None => self.phone.create(path, is_directory),
+        }
+    }
+
+    fn write(
+        &self,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(u64, proto::FileInfo), PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.write(path, offset, data),
+            None => self.phone.write(path, offset, data),
+        }
+    }
+
+    fn truncate(&self, path: &str, size: u64) -> Result<proto::FileInfo, PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.truncate(path, size),
+            None => self.phone.truncate(path, size),
+        }
+    }
+
+    fn delete(&self, path: &str) -> Result<(), PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.delete(path),
+            None => self.phone.delete(path),
+        }
+    }
+
+    /// Through adb when either end is restricted: the phone app can't reach that end.
+    fn rename(&self, from: &str, to: &str, replace_existing: bool) -> Result<(), PhoneError> {
+        match self.adb(from).or(self.adb(to)) {
+            Some(adb) => adb.rename(from, to, replace_existing),
+            None => self.phone.rename(from, to, replace_existing),
+        }
+    }
+
+    fn set_modified(&self, path: &str, modified_ms: i64) -> Result<(), PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.set_modified(path, modified_ms),
+            None => self.phone.set_modified(path, modified_ms),
+        }
+    }
+
+    fn flush(&self, path: &str) -> Result<(), PhoneError> {
+        match self.adb(path) {
+            Some(adb) => adb.flush(path),
+            None => self.phone.flush(path),
+        }
+    }
+
+    fn volume_info(&self) -> Result<phone::VolumeInfo, PhoneError> {
+        self.phone.volume_info()
+    }
 }
 
 /// Which drive letter to mount on.
@@ -153,9 +270,26 @@ pub enum DriveChoice {
 pub struct Mount {
     host: FileSystemHost<PhoneFs>,
     pub drive: char,
+    restricted: Arc<AtomicU8>,
 }
 
+const RESTRICTED_UNSEEN: u8 = 0;
+const RESTRICTED_HIT: u8 = 1;
+const RESTRICTED_REPORTED: u8 = 2;
+
 impl Mount {
+    /// True the first time Explorer has run into a restricted folder on this mount, then never again.
+    pub fn take_restricted_hit(&self) -> bool {
+        self.restricted
+            .compare_exchange(
+                RESTRICTED_HIT,
+                RESTRICTED_REPORTED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
     pub fn unmount(mut self) {
         self.host.stop();
         self.host.unmount();
@@ -166,8 +300,17 @@ impl Mount {
 pub fn mount(phone: PhoneClient, options: &MountOptions) -> Result<Mount, MountError> {
     load_winfsp()?;
 
+    let restricted = Arc::new(AtomicU8::new(RESTRICTED_UNSEEN));
     let fs = PhoneFs {
-        phone,
+        files: Storage {
+            phone,
+            adb: options.adb.clone().map(AdbFiles::new),
+        },
+        restricted: restricted.clone(),
+        mounted_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
         label: options.label.clone(),
         hide_dotfiles: options.hide_dotfiles,
         read_only: options.read_only,
@@ -206,7 +349,11 @@ pub fn mount(phone: PhoneClient, options: &MountOptions) -> Result<Mount, MountE
     host.start()
         .map_err(|e| failed("couldn't start the filesystem", &e))?;
 
-    Ok(Mount { host, drive })
+    Ok(Mount {
+        host,
+        drive,
+        restricted,
+    })
 }
 
 /// First letter not in use, searching down from Z: (where the WebDAV mount used to live, and where removable drives rarely land).
@@ -277,7 +424,11 @@ fn build_security_descriptor() -> Result<Vec<u8>, String> {
 }
 
 pub struct PhoneFs {
-    phone: PhoneClient,
+    files: Storage,
+    /// See [`Mount::take_restricted_hit`].
+    restricted: Arc<AtomicU8>,
+    /// The notice file's timestamp.
+    mounted_ms: i64,
     /// The drive's name in Explorer, already made safe by [`volume_label`].
     label: String,
     hide_dotfiles: bool,
@@ -349,14 +500,31 @@ impl PhoneFs {
         to_file_info(info, self.hide_dotfiles)
     }
 
+    /// The notice stands in for a restricted folder's contents, unless adb can show the real ones.
+    fn shows_notice(&self, path: &str) -> bool {
+        self.files.adb.is_none() && is_notice(path)
+    }
+
+    fn notice_info(&self) -> proto::FileInfo {
+        proto::FileInfo {
+            name: NOTICE_NAME.to_string(),
+            size_bytes: NOTICE_TEXT.len() as i64,
+            is_directory: false,
+            last_modified_ms: self.mounted_ms,
+        }
+    }
+
     /// Metadata for `path`, from a recent listing of its parent if there is one.
     fn lookup(&self, path: &str) -> winfsp::Result<proto::FileInfo> {
+        if self.shows_notice(path) {
+            return Ok(self.notice_info());
+        }
         if let Some((parent, name)) = split_parent(path)
             && let Some(answer) = self.lookup_in_listing(parent, name)
         {
             return answer;
         }
-        self.phone.stat(path).map_err(nt_error)
+        self.files.stat(path).map_err(nt_error)
     }
 
     /// `None` when there's no usable listing of `parent`, so the caller should ask the phone.
@@ -383,7 +551,22 @@ impl PhoneFs {
 
     /// List `path` from the phone and remember the result.
     fn list(&self, path: &str) -> winfsp::Result<Vec<proto::FileInfo>> {
-        let entries = self.phone.list_dir(path).map_err(nt_error)?;
+        let entries = match self.files.list_dir(path) {
+            // Explorer would offer to "gain access" as Administrator, which can't work on a phone.
+            Err(PhoneError::Remote {
+                code: ErrorCode::AccessDenied,
+                ..
+            }) if is_restricted(path) => {
+                let _ = self.restricted.compare_exchange(
+                    RESTRICTED_UNSEEN,
+                    RESTRICTED_HIT,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                vec![self.notice_info()]
+            }
+            other => other.map_err(nt_error)?,
+        };
         let mut listings = lock(&self.listings);
         listings.retain(|_, l| l.fetched.elapsed() <= LISTING_TTL);
         listings.insert(
@@ -409,7 +592,7 @@ impl PhoneFs {
     /// Set a file's length on the phone and record the result.
     fn truncate_to(&self, context: &PhoneFile, size: u64) -> winfsp::Result<()> {
         let path = context.path();
-        let result = self.phone.truncate(&path, size);
+        let result = self.files.truncate(&path, size);
         self.invalidate(&path);
         context.set_info(self.file_info(&result.map_err(nt_error)?));
         context.dirty.store(true, Ordering::SeqCst);
@@ -419,7 +602,7 @@ impl PhoneFs {
     /// Have the phone close and sync a file this handle has written to.
     fn sync(&self, context: &PhoneFile) -> winfsp::Result<()> {
         if context.dirty.swap(false, Ordering::SeqCst)
-            && let Err(e) = self.phone.flush(&context.path())
+            && let Err(e) = self.files.flush(&context.path())
         {
             // Still unsynced: let a later flush or cleanup try again.
             context.dirty.store(true, Ordering::SeqCst);
@@ -469,7 +652,11 @@ impl FileSystemContext for PhoneFs {
         file_info: &mut OpenFileInfo,
     ) -> winfsp::Result<PhoneFile> {
         let path = android_path(file_name);
-        let info = self.file_info(&self.lookup(&path)?);
+        let mut info = self.file_info(&self.lookup(&path)?);
+        if self.shows_notice(&path) {
+            info.file_attributes =
+                (info.file_attributes & !FILE_ATTRIBUTE_NORMAL) | FILE_ATTRIBUTE_READONLY;
+        }
         *file_info.as_mut() = info.clone();
         Ok(PhoneFile::new(path, info))
     }
@@ -526,14 +713,21 @@ impl FileSystemContext for PhoneFs {
             return Err(FspError::NTSTATUS(STATUS_END_OF_FILE));
         }
 
-        // One phone request carries at most MAX_READ, so fill bigger reads in pieces.
         let path = context.path();
+        if self.shows_notice(&path) {
+            let text = &NOTICE_TEXT.as_bytes()[offset as usize..];
+            let n = text.len().min(buffer.len());
+            buffer[..n].copy_from_slice(&text[..n]);
+            return Ok(n as u32);
+        }
+
+        // One phone request carries at most MAX_READ, so fill bigger reads in pieces.
         let want = buffer.len().min((size - offset) as usize);
         let mut filled = 0;
         while filled < want {
             let len = (want - filled).min(MAX_READ as usize) as u32;
             let chunk = self
-                .phone
+                .files
                 .read(&path, offset + filled as u64, len)
                 .map_err(nt_error)?;
             let n = chunk.data.len().min(want - filled);
@@ -563,7 +757,7 @@ impl FileSystemContext for PhoneFs {
         self.writable()?;
         let path = android_path(file_name);
         let is_directory = create_options & FILE_DIRECTORY_FILE != 0;
-        let created = self.phone.create(&path, is_directory);
+        let created = self.files.create(&path, is_directory);
         self.invalidate(&path);
         let info = self.file_info(&created.map_err(nt_error)?);
         *file_info.as_mut() = info.clone();
@@ -615,7 +809,7 @@ impl FileSystemContext for PhoneFs {
         let mut written = 0usize;
         let mut failure = None;
         for chunk in data.chunks(MAX_WRITE) {
-            match self.phone.write(&path, offset + written as u64, chunk) {
+            match self.files.write(&path, offset + written as u64, chunk) {
                 Ok((n, info)) => {
                     written += n as usize;
                     context.set_info(self.file_info(&info));
@@ -683,7 +877,7 @@ impl FileSystemContext for PhoneFs {
         // Only the modification time means anything: Attributes come from the name (dot-files are hidden) and Android keeps no creation time. 0 means "leave it".
         if last_write_time != 0 {
             let path = context.path();
-            self.phone
+            self.files
                 .set_modified(&path, unix_ms_from_filetime(last_write_time))
                 .map_err(nt_error)?;
             let mut info = context.info();
@@ -720,7 +914,7 @@ impl FileSystemContext for PhoneFs {
         self.writable()?;
         let from = android_path(file_name);
         let to = android_path(new_file_name);
-        let result = self.phone.rename(&from, &to, replace_if_exists);
+        let result = self.files.rename(&from, &to, replace_if_exists);
         // Renaming a folder moves everything under it too, so rather than work out which cached listings are affected, drop them all.
         lock(&self.listings).clear();
         result.map_err(nt_error)?;
@@ -734,7 +928,7 @@ impl FileSystemContext for PhoneFs {
         if FspCleanupFlags::FspCleanupDelete.is_flagged(flags) {
             // The phone closes the file if it has it open for writing, so no sync is needed.
             context.dirty.store(false, Ordering::SeqCst);
-            if let Err(e) = self.phone.delete(&path) {
+            if let Err(e) = self.files.delete(&path) {
                 log::warn!("⚠️  Couldn't delete {path} on the phone: {e}");
             }
             self.invalidate(&path);
@@ -755,7 +949,7 @@ impl FileSystemContext for PhoneFs {
     // Volume
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
-        let volume = self.phone.volume_info().map_err(nt_error)?;
+        let volume = self.files.volume_info().map_err(nt_error)?;
         out_volume_info.total_size = volume.total_bytes;
         out_volume_info.free_size = volume.free_bytes;
         out_volume_info.set_volume_label(&self.label);
@@ -852,11 +1046,14 @@ fn nt_error(e: PhoneError) -> FspError {
             ErrorCode::NoSpace => STATUS_DISK_FULL,
             ErrorCode::IoError | ErrorCode::Ok => STATUS_IO_DEVICE_ERROR,
         },
-        PhoneError::Disconnected => STATUS_DEVICE_NOT_CONNECTED,
+        PhoneError::Disconnected | PhoneError::ClosedByPhone => STATUS_DEVICE_NOT_CONNECTED,
         PhoneError::Transport(_) | PhoneError::UnexpectedReply => STATUS_IO_DEVICE_ERROR,
     };
 
-    if !matches!(e, PhoneError::Remote { .. } | PhoneError::Disconnected) {
+    if !matches!(
+        e,
+        PhoneError::Remote { .. } | PhoneError::Disconnected | PhoneError::ClosedByPhone
+    ) {
         log::warn!("⚠️  {e}");
     }
     FspError::NTSTATUS(status)
@@ -941,6 +1138,13 @@ mod tests {
         let backing = std::env::temp_dir().join(format!("windroidfs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&backing);
         fs::create_dir_all(backing.join("DCIM").join("Camera")).unwrap();
+        fs::create_dir_all(
+            backing
+                .join("Android")
+                .join("data")
+                .join("com.example.game"),
+        )
+        .unwrap();
         fs::write(backing.join("hello.txt"), b"hello world").unwrap();
         fs::write(backing.join(".nomedia"), b"").unwrap();
         fs::write(backing.join("My Files.txt"), "spaces and café").unwrap();
@@ -953,6 +1157,7 @@ mod tests {
             drive: DriveChoice::Auto,
             read_only: false,
             hide_dotfiles: true,
+            adb: None,
         };
         let mount = mount(PhoneClient::local(backing.clone()), &options).expect("mount failed");
         let root = format!("{}:\\", mount.drive);
@@ -964,7 +1169,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, [".nomedia", "DCIM", "My Files.txt", "hello.txt"]);
+        assert_eq!(
+            names,
+            [".nomedia", "Android", "DCIM", "My Files.txt", "hello.txt"]
+        );
 
         // Small and large reads, the large one spanning several MAX_READ chunks.
         assert_eq!(
@@ -1068,6 +1276,23 @@ mod tests {
         // Creating something that already exists is refused.
         assert!(fs::create_dir(format!("{root}DCIM")).is_err());
 
+        // A folder Android keeps apps out of lists only the notice, which reads back from the PC.
+        assert!(!mount.take_restricted_hit());
+        let data = format!("{root}Android\\data");
+        let listed: Vec<String> = fs::read_dir(&data)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(listed, [NOTICE_NAME]);
+        let notice = format!("{data}\\{NOTICE_NAME}");
+        assert_eq!(fs::read_to_string(&notice).unwrap(), NOTICE_TEXT);
+        assert!(fs::metadata(&notice).unwrap().permissions().readonly());
+        assert!(mount.take_restricted_hit());
+        assert!(!mount.take_restricted_hit(), "reported once per mount");
+        // Reaching past it is a plain "not found", as on the phone.
+        let err = fs::read(format!("{data}\\com.other.app\\save.dat")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
         mount.unmount();
 
         // Read-only, with dot-files shown: writes are refused before they reach the phone.
@@ -1086,6 +1311,58 @@ mod tests {
         assert_eq!(nomedia.file_attributes() & FILE_ATTRIBUTE_HIDDEN, 0);
         read_only.unmount();
 
+        let _ = fs::remove_dir_all(&backing);
+    }
+
+    /// The restricted folders through a real phone's adb, everything else from a local folder.
+    /// Needs WinFsp and a phone with USB debugging on: `cargo test serves_restricted_folders_through_adb -- --ignored`
+    #[test]
+    #[ignore]
+    fn serves_restricted_folders_through_adb() {
+        use std::fs;
+
+        let backing =
+            std::env::temp_dir().join(format!("windroidfs-adb-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&backing);
+        fs::create_dir_all(backing.join("Android").join("data")).unwrap();
+        let options = MountOptions {
+            label: "Test Phone".into(),
+            drive: DriveChoice::Auto,
+            read_only: false,
+            hide_dotfiles: true,
+            adb: Some(crate::adb::phone().expect("no phone in `adb devices`")),
+        };
+        let mount = mount(PhoneClient::local(backing.clone()), &options).expect("mount failed");
+        let root = format!("{}:\\", mount.drive);
+
+        // The real Android/data, not the notice.
+        let apps = fs::read_dir(format!("{root}Android\\data"))
+            .unwrap()
+            .count();
+        println!("{root}Android\\data lists {apps} apps");
+        assert!(apps > 1);
+
+        let dir = format!("{root}Android\\obb\\.windroidfs-drive-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let file = format!("{dir}\\big.bin");
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+        fs::write(&file, &data).unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().len(), data.len() as u64);
+        assert_eq!(fs::read(&file).unwrap(), data);
+
+        let renamed = format!("{dir}\\renamed.bin");
+        fs::rename(&file, &renamed).unwrap();
+        assert!(fs::metadata(&file).is_err());
+        assert!(fs::remove_dir(&dir).is_err(), "not empty yet");
+        fs::remove_file(&renamed).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        assert!(
+            !mount.take_restricted_hit(),
+            "no notice when adb can reach them"
+        );
+
+        mount.unmount();
         let _ = fs::remove_dir_all(&backing);
     }
 

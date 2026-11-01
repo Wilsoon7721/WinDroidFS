@@ -15,7 +15,7 @@ use crate::driver;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
-use crate::{tether, webdav, winfsp_fs};
+use crate::{adb, tether, webdav, winfsp_fs};
 
 pub use crate::windroid::UsbSpeed;
 pub use crate::winfsp_fs::DriveChoice;
@@ -50,21 +50,23 @@ pub struct Options {
 /// Which link to use with a phone that could do either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinkChoice {
-    /// USB tethering if it's on, otherwise Direct USB.
+    /// USB tethering if it's on, then adb if it sees the phone, otherwise Direct USB.
     #[default]
     Auto,
     /// Direct USB (Accessory Mode) even when tethering is on, which it turns off.
     DirectUsb,
     /// Only USB tethering: never switches the phone into Accessory Mode, just waits for tethering.
     Tethering,
+    /// Only through adb: needs USB debugging on and adb on this PC. No driver swap, and MTP keeps working.
+    Adb,
 }
 
 /// Whether connecting may need the driver service. Only Direct USB swaps drivers.
 pub fn needs_service(link: LinkChoice) -> bool {
     match link {
-        LinkChoice::Auto => tether::phone_address().is_none(),
+        LinkChoice::Auto => tether::phone_address().is_none() && adb::phone().is_none(),
         LinkChoice::DirectUsb => true,
-        LinkChoice::Tethering => false,
+        LinkChoice::Tethering | LinkChoice::Adb => false,
     }
 }
 
@@ -88,6 +90,8 @@ pub enum Event {
     /// The link is open but the phone app isn't answering yet: it needs opening on the phone.
     /// Waits for as long as the phone stays plugged in.
     WaitingForApp,
+    /// Explorer opened Android\data or Android\obb, which Android keeps every app out of. Once per mount.
+    RestrictedFolder,
     /// Mounted and serving.
     Mounted {
         drive: char,
@@ -107,6 +111,8 @@ pub enum Ended {
     Stopped,
     /// The phone went away while mounted. Either unplugged or the link was closed on the phone.
     PhoneLost,
+    /// The phone's Disconnect button was pressed. Don't reconnect until it's replugged.
+    ClosedByPhone,
     /// Never got as far as mounting. The message says why for the user.
     Failed(String),
 }
@@ -171,6 +177,7 @@ pub fn phone_present(link: LinkChoice) -> bool {
     let tethered = tether::phone_address().is_some();
     match link {
         LinkChoice::Tethering => return tethered,
+        LinkChoice::Adb => return adb::phone().is_some(),
         LinkChoice::Auto if tethered => return true,
         _ => {}
     }
@@ -200,6 +207,8 @@ pub fn run(options: &Options, stop: &Stop, on_event: &dyn Fn(Event)) -> Ended {
 pub struct Connected {
     pub phone: PhoneClient,
     pub device_name: String,
+    /// Held as long as the link: dropping it removes the adb forward.
+    pub forward: Option<adb::Forward>,
 }
 
 /// Connect to the phone without mounting it, for tools like `windows-daemon bench`.
@@ -227,7 +236,16 @@ fn connect_and_serve(
     on_event: &dyn Fn(Event),
 ) -> rusb::Result<Ended> {
     Ok(match connect_phone(options.link, stop, on_event)? {
-        Ok(Connected { phone, device_name }) => serve(phone, &device_name, options, stop, on_event),
+        Ok(Connected {
+            phone,
+            device_name,
+            forward,
+        }) => {
+            let adb = forward.as_ref().map(|f| f.phone().clone());
+            let ended = serve(phone, &device_name, adb, options, stop, on_event);
+            drop(forward);
+            ended
+        }
         Err(ended) => ended,
     })
 }
@@ -243,7 +261,7 @@ fn connect_phone(
 
     // Before USB: the AOA handshake would take the phone out of tethering.
     let tethered = match link {
-        LinkChoice::DirectUsb => None,
+        LinkChoice::DirectUsb | LinkChoice::Adb => None,
         LinkChoice::Auto | LinkChoice::Tethering => tether::phone_address(),
     };
     if link == LinkChoice::Tethering && tethered.is_none() {
@@ -269,6 +287,22 @@ fn connect_phone(
         };
         log::info!("⚡ Connected over USB tethering.");
         return Ok(answering(phone, stop, on_event));
+    }
+
+    // Also before Direct USB, which needs the adb server to let go of the phone
+    if matches!(link, LinkChoice::Auto | LinkChoice::Adb) {
+        match adb::phone() {
+            Some(phone) => {
+                log::info!("Found {} through adb.", phone.serial);
+                return Ok(connect_adb(&phone, stop, on_event));
+            }
+            None if link == LinkChoice::Adb => {
+                return Ok(Err(failed(
+                    "adb doesn't see the phone. Turn on USB debugging, allow this PC on the phone, and install Android's platform-tools.",
+                )));
+            }
+            None => {}
+        }
     }
 
     // Push the phone into AOA mode
@@ -343,10 +377,47 @@ fn answering(
     match wait_for_app(&phone, stop, on_event) {
         Some(device_name) => {
             log::info!("🏓 Phone responded to Ping! The link is active.");
-            Ok(Connected { phone, device_name })
+            Ok(Connected {
+                phone,
+                device_name,
+                forward: None,
+            })
         }
         None if stop.requested() => Err(Ended::Stopped),
+        None if phone.closed_by_phone() => Err(Ended::ClosedByPhone),
         None => Err(Ended::PhoneLost),
+    }
+}
+
+/// Connect to the phone app through adb, waiting for it to be opened. Retries, as adb takes the connection even when the app isn't listening.
+fn connect_adb(
+    phone: &adb::AdbPhone,
+    stop: &Stop,
+    on_event: &dyn Fn(Event),
+) -> Result<Connected, Ended> {
+    let mut asked = false;
+    loop {
+        if let Some((stream, forward)) = adb::connect(phone)
+            && let Ok(client) = PhoneClient::over_tcp(stream)
+            && client.ping().is_ok()
+        {
+            log::info!("⚡ Connected over ADB.");
+            let mut connected = answering(client, stop, on_event)?;
+            connected.forward = Some(forward);
+            return Ok(connected);
+        }
+        if !asked {
+            asked = true;
+            log::info!("📱 Waiting for the WinDroidFS app on the phone.");
+            log::info!("   -> Open it on the phone (and update it if it's an older build).");
+            on_event(Event::WaitingForApp);
+        }
+        if stop.sleep(Duration::from_secs(1)) {
+            return Err(Ended::Stopped);
+        }
+        if adb::phone().as_ref() != Some(phone) {
+            return Err(Ended::PhoneLost);
+        }
     }
 }
 
@@ -398,6 +469,7 @@ fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> O
 fn serve(
     phone: PhoneClient,
     device_name: &str,
+    adb: Option<adb::AdbPhone>,
     options: &Options,
     stop: &Stop,
     on_event: &dyn Fn(Event),
@@ -407,6 +479,7 @@ fn serve(
         drive: options.drive,
         read_only: options.read_only,
         hide_dotfiles: options.hide_dotfiles,
+        adb,
     };
     let label = &mount_options.label;
     if !options.force_webdav {
@@ -427,7 +500,11 @@ fn serve(
                     webdav: false,
                     usb_speed: phone.usb_speed(),
                 });
-                let ended = wait_while_mounted(&phone, stop);
+                let ended = wait_while_mounted(&phone, stop, || {
+                    if mount.take_restricted_hit() {
+                        on_event(Event::RestrictedFolder);
+                    }
+                });
                 log::info!("Unmounting {}:...", mount.drive);
                 mount.unmount();
                 say_goodbye(&phone, &ended);
@@ -454,12 +531,17 @@ fn say_goodbye(phone: &PhoneClient, ended: &Ended) {
     }
 }
 
-/// Block until a stop is requested or the phone goes away, and say which.
-fn wait_while_mounted(phone: &PhoneClient, stop: &Stop) -> Ended {
+/// Block until a stop is requested or the phone goes away, and say which. `tick` runs every quarter second meanwhile.
+fn wait_while_mounted(phone: &PhoneClient, stop: &Stop, tick: impl Fn()) -> Ended {
     while phone.is_connected() {
+        tick();
         if stop.sleep(Duration::from_millis(250)) {
             return Ended::Stopped;
         }
+    }
+    if phone.closed_by_phone() {
+        log::info!("📴 The phone ended the connection.");
+        return Ended::ClosedByPhone;
     }
     log::info!("📴 Lost the phone (unplugged, or the link was closed on the phone).");
     Ended::PhoneLost
@@ -514,7 +596,7 @@ fn mount_webdav(
         usb_speed: phone.usb_speed(),
     });
 
-    let ended = wait_while_mounted(&phone, stop);
+    let ended = wait_while_mounted(&phone, stop, || {});
 
     log::info!("Unmounting {target} drive...");
     let _ = net_use(&["use", &target, "/delete"]);

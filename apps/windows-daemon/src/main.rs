@@ -27,6 +27,8 @@ fn main() -> rusb::Result<()> {
             LinkChoice::Tethering
         } else if flag("--direct-usb") {
             LinkChoice::DirectUsb
+        } else if flag("--adb") {
+            LinkChoice::Adb
         } else {
             LinkChoice::Auto
         },
@@ -64,7 +66,7 @@ fn main() -> rusb::Result<()> {
 
     loop {
         match session::run(&options, &stop, &on_event) {
-            Ended::Stopped | Ended::Failed(_) => return Ok(()),
+            Ended::Stopped | Ended::Failed(_) | Ended::ClosedByPhone => return Ok(()),
             Ended::PhoneLost => {
                 println!(
                     "🔌 Waiting for the phone to come back (checking every {}s, {} times)...",

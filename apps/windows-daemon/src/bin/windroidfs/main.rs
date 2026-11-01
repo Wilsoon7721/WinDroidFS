@@ -295,6 +295,10 @@ fn supervise(shared: &Shared) {
         remounting = false;
         let on_event = |event: Event| match event {
             Event::Connecting => shared.set_status(Status::Connecting),
+            Event::RestrictedFolder => notify::show(
+                "Android keeps this folder private",
+                "Android doesn't let apps, WinDroidFS included, open Android\\data or Android\\obb. adb is allowed in: turn on USB debugging and choose Connect over > ADB only to reach them.",
+            ),
             Event::WaitingForApp => shared.set_status(Status::WaitingForApp),
             Event::Mounted {
                 drive,
@@ -318,6 +322,12 @@ fn supervise(shared: &Shared) {
         match session::run(&options, &stop, &on_event) {
             Ended::Stopped => {
                 remounting = shared.restart.swap(false, Ordering::SeqCst);
+            }
+            Ended::ClosedByPhone => {
+                wait_for_unplug = true;
+                shared.set_status(Status::Ended(
+                    "Disconnected from the phone. Unplug and replug it to reconnect.".into(),
+                ));
             }
             Ended::PhoneLost => {
                 wait_for_unplug = true;
@@ -388,6 +398,7 @@ impl Tray {
             (LinkChoice::Auto, "Automatic (USB tethering if it's on)"),
             (LinkChoice::DirectUsb, "Direct USB only"),
             (LinkChoice::Tethering, "USB tethering only"),
+            (LinkChoice::Adb, "ADB only (USB debugging)"),
         ]
         .map(|(choice, text)| (choice, CheckMenuItem::new(text, true, false, None)))
         .to_vec();

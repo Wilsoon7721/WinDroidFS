@@ -23,6 +23,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
+import dev.wilsoon.windroidfs.link.Adb
 import dev.wilsoon.windroidfs.link.LinkService
 import dev.wilsoon.windroidfs.link.LinkState
 import dev.wilsoon.windroidfs.link.LinkTransport
@@ -60,6 +61,8 @@ class MainActivity : ComponentActivity() {
 
     private fun handleUsbIntent(intent: Intent) {
         if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
+            // A fresh attach means the PC handshook again, so a past Disconnect no longer applies.
+            LinkState.endedByUser = false
             val accessory: UsbAccessory? = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
             accessory?.let { connect(it) }
         }
@@ -176,6 +179,7 @@ class MainActivity : ComponentActivity() {
         method = when (transport) {
             LinkTransport.ACCESSORY -> ConnectionMethod.AOA
             LinkTransport.TETHERING -> ConnectionMethod.TETHERING
+            LinkTransport.ADB -> ConnectionMethod.ADB
         },
         hostName = hostName.ifEmpty { "your PC" },
         uptimeSeconds = uptimeSeconds,
@@ -247,9 +251,15 @@ class MainActivity : ComponentActivity() {
         val accessory = accessoryList?.find {
             it.manufacturer == "Wilson Oon" && it.model == "WinDroidFS"
         }
+        val tethered = Tethering.address() != null
+        if (accessory == null && !tethered) LinkState.endedByUser = false
+        if (LinkState.endedByUser) return
+
+        // Wait on every route there is: the PC picks one
+        if (tethered) LinkService.listenOnTethering(this)
+        if (Adb.available(this)) LinkService.listenOnAdb(this)
         if (accessory == null) {
             permissionRequested = false
-            if (Tethering.address() != null) LinkService.listenOnTethering(this)
             return
         }
 

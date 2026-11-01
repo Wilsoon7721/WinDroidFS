@@ -40,6 +40,8 @@ pub const MAX_WRITE: usize = 1024 * 1024;
 pub enum PhoneError {
     /// Phone was unplugged or the link failed
     Disconnected,
+    /// The phone hung up (its Disconnect button) by answering with a goodbye
+    ClosedByPhone,
     /// Request couldn't be delivered or answered (timeout, USB error)
     Transport(String),
     /// Phone answered, and the answer was no
@@ -55,6 +57,7 @@ impl std::fmt::Display for PhoneError {
             PhoneError::Transport(why) => write!(f, "{why}"),
             PhoneError::Remote { code, message } => write!(f, "{message} ({code:?})"),
             PhoneError::UnexpectedReply => write!(f, "the phone sent an unexpected reply"),
+            PhoneError::ClosedByPhone => write!(f, "the phone ended the connection"),
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct PhoneClient {
     tx: mpsc::Sender<UsbJob>,
     speed: UsbSpeed,
     alive: Arc<AtomicBool>,
+    closed_by_phone: Arc<AtomicBool>,
 }
 
 impl PhoneClient {
@@ -115,12 +119,18 @@ impl PhoneClient {
             scratch: vec![0u8; READ_CHUNK],
             next_id: 0,
         };
-        let thread_alive = alive.clone();
+        let closed_by_phone = Arc::new(AtomicBool::new(false));
+        let (thread_alive, thread_closed) = (alive.clone(), closed_by_phone.clone());
         thread::Builder::new()
             .name("windroid-link".into())
-            .spawn(move || link_thread(link, rx, &thread_alive))
+            .spawn(move || link_thread(link, rx, &thread_alive, &thread_closed))
             .expect("failed to start the link thread");
-        PhoneClient { tx, speed, alive }
+        PhoneClient {
+            tx,
+            speed,
+            alive,
+            closed_by_phone,
+        }
     }
 
     // Tell the phone this PC is disconnecting so it ends the link
@@ -136,6 +146,11 @@ impl PhoneClient {
     /// False once the link has died. Will never become true again - reconnecting means a new handshake and client
     pub fn is_connected(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// The link ended because the phone hung up, so reconnecting by itself would go against the user.
+    pub fn closed_by_phone(&self) -> bool {
+        self.closed_by_phone.load(Ordering::SeqCst)
     }
 
     /// Send one request and wait for its reply
@@ -421,7 +436,12 @@ struct Link {
     next_id: u32,
 }
 
-fn link_thread(mut link: Link, rx: mpsc::Receiver<UsbJob>, alive: &AtomicBool) {
+fn link_thread(
+    mut link: Link,
+    rx: mpsc::Receiver<UsbJob>,
+    alive: &AtomicBool,
+    closed_by_phone: &AtomicBool,
+) {
     let mut established = false;
 
     loop {
@@ -442,6 +462,10 @@ fn link_thread(mut link: Link, rx: mpsc::Receiver<UsbJob>, alive: &AtomicBool) {
         established |= result.is_ok();
         let link_failed = match &result {
             Err(PhoneError::Disconnected) => true,
+            Err(PhoneError::ClosedByPhone) => {
+                closed_by_phone.store(true, Ordering::SeqCst);
+                true
+            }
             Err(PhoneError::Transport(_)) => established && !link.healthy(),
             _ => false,
         };
@@ -501,7 +525,13 @@ fn exchange(
             match frame::take_frame(inbox) {
                 Frame::Complete(bytes) => match Packet::decode(bytes.as_slice()) {
                     Ok(reply) if reply.request_id == request.request_id => {
-                        return reply.payload.ok_or(PhoneError::UnexpectedReply);
+                        let said_goodbye = matches!(request.payload, Some(Payload::Goodbye(_)));
+                        return match reply.payload {
+                            Some(Payload::Goodbye(_)) if !said_goodbye => {
+                                Err(PhoneError::ClosedByPhone)
+                            }
+                            payload => payload.ok_or(PhoneError::UnexpectedReply),
+                        };
                     }
                     Ok(stale) => log::warn!(
                         "⚠️  Dropped a late reply to request {} (waiting for {}).",
@@ -565,6 +595,7 @@ impl PhoneClient {
             tx,
             speed: UsbSpeed::Unknown,
             alive: Arc::new(AtomicBool::new(true)),
+            closed_by_phone: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -588,7 +619,7 @@ mod local {
                 timestamp_ms: p.timestamp_ms,
                 device_name: "Test Phone".into(),
             }),
-            Payload::DirRequest(r) => Payload::DirResponse(list(&resolve(root, &r.path))),
+            Payload::DirRequest(r) => Payload::DirResponse(list(root, &resolve(root, &r.path))),
             Payload::StatRequest(r) => Payload::StatResponse(stat(root, &resolve(root, &r.path))),
             Payload::FileReq(r) => {
                 Payload::FileRes(read(&resolve(root, &r.path), r.offset, r.max_bytes))
@@ -741,12 +772,20 @@ mod local {
         }
     }
 
-    fn list(dir: &Path) -> DirectoryResponse {
+    fn list(root: &Path, dir: &Path) -> DirectoryResponse {
         let fail = |code: ErrorCode| DirectoryResponse {
             success: false,
             error_code: code as i32,
             ..Default::default()
         };
+        // As on Android 11+
+        for restricted in ["Android/data", "Android/obb"] {
+            if dir.to_string_lossy().to_lowercase()
+                == root.join(restricted).to_string_lossy().to_lowercase()
+            {
+                return fail(ErrorCode::AccessDenied);
+            }
+        }
         match fs::metadata(dir) {
             Err(_) => return fail(ErrorCode::NotFound),
             Ok(m) if !m.is_dir() => return fail(ErrorCode::NotADirectory),

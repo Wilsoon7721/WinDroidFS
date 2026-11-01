@@ -49,9 +49,11 @@ tray icon whose tooltip and menu say what's happening ("Wilson's S25+ is mounted
 click opens the drive. The menu has:
 
 - **Mount phones when plugged in**: the on/off switch. Off leaves phones alone, so MTP works.
-- **Connect over**: automatic (USB tethering if it's on, otherwise Direct USB), Direct USB
-  only, or USB tethering only. Tethering only never switches the phone into Accessory Mode, so
-  there's time to turn tethering on after plugging in.
+- **Connect over**: automatic (USB tethering if it's on, then ADB if `adb` sees the phone,
+  otherwise Direct USB), Direct USB only, USB tethering only, or ADB only. Tethering and ADB
+  never switch the phone into Accessory Mode, so there's time to turn them on after plugging
+  in, and neither needs the driver service. ADB finds `adb.exe` on PATH or in the Android SDK,
+  and the phone only accepts connections from adbd itself, never from other apps.
 - **Drive letter**: automatic (first free from Z: down), or a fixed letter. A taken letter
   falls back to automatic. Changing it while mounted remounts straight away.
 - **Options**: open in Explorer when mounted; read-only; hide dot-files.
@@ -106,6 +108,19 @@ units cut between characters, "Android" if nothing is left.
 writable. If WinFsp isn't installed the daemon says so, links to it, and falls back to
 **WebDAV** (`webdav.rs`), which needs nothing installed but is slower, read-only, and refuses
 files over ~50 MB. `--webdav` forces the fallback.
+
+Android 11+ keeps every app out of `Android/data` and `Android/obb`. Instead of an "access
+denied" (which Explorer answers with a "gain access" prompt that can't work on a phone), the drive
+lists one read-only `Why is this folder empty.txt` there, served from the PC and never written to
+the phone, and the tray shows a notification the first time per mount. Paths inside them are
+plain "not found", as they are to the phone app.
+
+Over the ADB route they work for real: adb's shell user is still allowed in, so `adb_files.rs`
+serves them through the adb server's own file-transfer protocol (what `adb pull`/`push` use) on
+one long-lived connection, and everything else still comes from the phone app. That protocol only
+moves whole files, so a file is downloaded to a temporary copy on first read (fetched again if
+the phone's copy changes), written there, and sent back when Windows flushes or closes it. Large
+`.obb` files therefore download in full before the first byte reaches Explorer.
 
 Writes go to the phone as they happen, at most 1 MiB per request. The phone keeps the file
 being written open between requests, and when Windows closes it the PC sends a flush: the
@@ -172,7 +187,7 @@ cargo run --bin windroidfs
 | `windroidfs` | The tray app. |
 | `windows-daemon` | Console run: handshake, then mount the phone (WinFsp, else WebDAV). |
 | `windows-daemon --webdav` | Same, but always use the WebDAV mount. |
-| `windows-daemon --tethering` / `--direct-usb` | Same, but only over USB tethering, or only over Direct USB (Accessory Mode). Also work with `bench`. |
+| `windows-daemon --tethering` / `--adb` / `--direct-usb` | Same, but only over USB tethering, ADB, or Direct USB (Accessory Mode). Also work with `bench`. |
 | `windows-daemon bench [MiB]` | Connect without mounting and measure ping time, then write and read speed with a temporary file on the phone (128 MiB by default). |
 | `windows-daemon restore-drivers` | Undo every driver swap (asks the service). |
 | `windroidfs-service run` | Foreground service, for development. |

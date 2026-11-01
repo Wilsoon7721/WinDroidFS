@@ -204,6 +204,7 @@ private fun AdbSetupContent(onOpenDeveloperOptions: () -> Unit) {
         SetupStep(1, "Enable Developer Options (Settings > About phone > tap Build number 7 times).")
         SetupStep(2, "Turn on USB Debugging.")
         SetupStep(3, "Plug in, then accept the \"Allow USB debugging?\" prompt.")
+        SetupStep(4, "On the PC, install Android's platform-tools (adb) and set WinDroidFS's tray menu to Connect over → ADB only. Keep this app open.")
         SetupActionButton(text = "Open Developer Options", onClick = onOpenDeveloperOptions)
     }
 }

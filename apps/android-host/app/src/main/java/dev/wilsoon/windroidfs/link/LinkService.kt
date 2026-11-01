@@ -12,21 +12,27 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
+import android.net.LocalServerSocket
+import android.net.LocalSocket
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.provider.Settings
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.protobuf.InvalidProtocolBufferException
 import dev.wilsoon.windroidfs.MainActivity
 import dev.wilsoon.windroidfs.R
+import dev.wilsoon.windroidfs.protocol.WinDroidProto.Goodbye
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Packet
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
+import java.io.Closeable
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -34,10 +40,11 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
-import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,15 +71,20 @@ object LinkState {
     internal fun publish(status: LinkStatus?) {
         mutableStatus.value = status
     }
+
+    /** Disconnect was pressed: don't link again until the cable is replugged or tethering toggled. */
+    @Volatile var endedByUser = false
+        internal set
 }
 
 /** Foreground service for USB link */
 class LinkService : Service() {
-    private var accessoryFd: ParcelFileDescriptor? = null
-    @Volatile private var listener: ServerSocket? = null
-    @Volatile private var socket: Socket? = null
+    /** Every route the PC might speak on. The first it does claims the link and the rest close. Closing one unblocks its thread. */
+    private val routes = ConcurrentHashMap<LinkTransport, Closeable>()
+    private val claimed = AtomicBoolean(false)
     @Volatile private var transport = LinkTransport.ACCESSORY
-    private var tetherAddress: InetAddress? = null
+    @Volatile private var tetherAddress: InetAddress? = null
+    private var detachRegistered = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var ticker: ScheduledExecutorService? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -91,12 +103,21 @@ class LinkService : Service() {
     @Volatile private var lastActivityMs = 0L
     @Volatile private var handlingRequest = false
     @Volatile private var pcSeen = false
+    /** Answer the PC's next request with a goodbye, then close. */
+    @Volatile private var sayingGoodbye = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            LinkState.endedByUser = true
+            if (running && pcSeen) {
+                // Over USB the PC only receives when it asks, so the goodbye waits for its next request (an idle ping within 3s).
+                sayingGoodbye = true
+                mainHandler.postDelayed({ stopSelf() }, GOODBYE_GRACE_MS)
+            } else {
+                stopSelf()
+            }
             return START_NOT_STICKY
         }
 
@@ -105,113 +126,148 @@ class LinkService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (running) return START_NOT_STICKY
+        // Linked already: the PC chose, so new routes don't matter
+        if (pcSeen) return START_NOT_STICKY
 
-        val opened = if (intent?.action == ACTION_TETHER) {
-            listen()
-        } else {
-            intent?.accessoryExtra()?.let(::open) ?: false
+        when (intent?.action) {
+            ACTION_TETHER -> offerTethering()
+            ACTION_ADB -> offerAdb()
+            else -> intent?.accessoryExtra()?.let(::offerAccessory)
         }
-        if (!opened) stopSelf()
+        if (routes.isEmpty()) stopSelf()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         running = false
-        try {
-            accessoryFd?.close()
-        } catch (_: IOException) {
-        }
-        accessoryFd = null
-        // Unblocks accept() and read() on the link thread
-        try {
-            listener?.close()
-            socket?.close()
-        } catch (_: IOException) {
-        }
+        routes.values.forEach(::quietlyClose)
+        routes.clear()
         ticker?.shutdownNow()
         ticker = null
-        try {
-            unregisterReceiver(detachReceiver)
-        } catch (_: IllegalArgumentException) {
-        }
+        if (detachRegistered) unregisterReceiver(detachReceiver)
         wakeLock?.takeIf { it.isHeld }?.release()
         LinkState.publish(null)
         super.onDestroy()
     }
 
-    private fun open(accessory: UsbAccessory): Boolean {
+    private fun offerAccessory(accessory: UsbAccessory) {
+        if (routes.containsKey(LinkTransport.ACCESSORY)) return
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         val fd = try {
             usbManager.openAccessory(accessory)
         } catch (e: Exception) {
             Log.e(TAG, "Couldn't open the accessory", e)
             null
-        } ?: return false
+        } ?: return
 
-        accessoryFd = fd
-        ContextCompat.registerReceiver(
-            this,
-            detachReceiver,
-            IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED),
-            ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
-        begin(LinkTransport.ACCESSORY) {
-            serve(FileInputStream(fd.fileDescriptor), FileOutputStream(fd.fileDescriptor))
+        if (!detachRegistered) {
+            ContextCompat.registerReceiver(
+                this,
+                detachReceiver,
+                IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            detachRegistered = true
         }
-        return true
+        offer(LinkTransport.ACCESSORY, fd) {
+            FileInputStream(fd.fileDescriptor) to FileOutputStream(fd.fileDescriptor)
+        }
     }
 
-    /** Wait for the PC on the USB tethering link. One PC at a time: the listener closes once it's in */
-    private fun listen(): Boolean {
-        val address = Tethering.address() ?: return false
+    /** Listen on the tethering link only, so nothing on Wi-Fi can reach it. */
+    private fun offerTethering() {
+        if (routes.containsKey(LinkTransport.TETHERING)) return
+        val address = Tethering.address() ?: return
         val server = try {
             ServerSocket(Tethering.PORT, 1, address)
         } catch (e: IOException) {
             Log.e(TAG, "Couldn't listen on $address", e)
-            return false
+            return
         }
-        listener = server
         tetherAddress = address
-        begin(LinkTransport.TETHERING) {
-            val client = try {
-                server.accept()
-            } catch (e: IOException) {
-                Log.i(TAG, "Stopped listening: ${e.message}")
-                mainHandler.post { stopSelf() }
-                return@begin
-            } finally {
-                try {
-                    server.close()
-                } catch (_: IOException) {
-                }
-            }
-            socket = client
+        offer(LinkTransport.TETHERING, server) {
+            val client = server.accept()
+            server.close()
+            routes[LinkTransport.TETHERING] = client
             client.tcpNoDelay = true
-            serve(client.getInputStream(), client.getOutputStream())
+            client.getInputStream() to client.getOutputStream()
+        }
+    }
+
+    /** `adb forward` reaches this socket. Other apps can too, so only adbd is let in. */
+    private fun offerAdb() {
+        if (routes.containsKey(LinkTransport.ADB)) return
+        val server = try {
+            LocalServerSocket(Adb.SOCKET_NAME)
+        } catch (e: IOException) {
+            Log.e(TAG, "Couldn't listen on @${Adb.SOCKET_NAME}", e)
+            return
+        }
+        // close() alone doesn't wake a blocked accept()
+        offer(LinkTransport.ADB, Closeable { shutdown(server.fileDescriptor); server.close() }) {
+            var client: LocalSocket
+            while (true) {
+                client = server.accept()
+                val uid = client.peerCredentials.uid
+                if (Adb.isAdbd(uid)) break
+                Log.w(TAG, "Refused a connection from uid $uid")
+                client.close()
+            }
+            shutdown(server.fileDescriptor)
+            server.close()
+            routes[LinkTransport.ADB] = Closeable { shutdown(client.fileDescriptor); client.close() }
+            client.inputStream to client.outputStream
+        }
+    }
+
+    /** Wait on [route] in its own thread: [connect] blocks until the PC arrives, and closing [handle] gives up. */
+    private fun offer(route: LinkTransport, handle: Closeable, connect: () -> Pair<InputStream, OutputStream>) {
+        routes[route] = handle
+        if (!running) {
+            running = true
+            pcSeen = false
+            claimed.set(false)
+            bytesRead.set(0)
+            bytesWritten.set(0)
+            ticker = Executors.newSingleThreadScheduledExecutor().apply {
+                scheduleWithFixedDelay(::publishStatus, 0, 1, TimeUnit.SECONDS)
+            }
+        }
+        Thread({
+            val streams = try {
+                connect()
+            } catch (e: IOException) {
+                Log.i(TAG, "Stopped waiting over $route: ${e.message}")
+                null
+            }
+            if (streams != null) serve(route, streams.first, streams.second)
+            routeEnded(route)
+        }, "windroid-$route").start()
+        Log.d(TAG, "Waiting for the PC over $route")
+    }
+
+    /** The PC spoke on [route] first: it's the link now. */
+    private fun claim(route: LinkTransport): Boolean {
+        if (!claimed.compareAndSet(false, true)) return false
+        transport = route
+        for ((other, handle) in routes) {
+            if (other != route) {
+                routes.remove(other)
+                quietlyClose(handle)
+            }
         }
         return true
     }
 
-    private fun begin(how: LinkTransport, link: () -> Unit) {
-        transport = how
-        running = true
-        pcSeen = false
-        bytesRead.set(0)
-        bytesWritten.set(0)
-        Thread(link, "windroid-link").start()
-        ticker = Executors.newSingleThreadScheduledExecutor().apply {
-            scheduleWithFixedDelay(::publishStatus, 0, 1, TimeUnit.SECONDS)
-        }
-        Log.d(TAG, "Waiting for the PC over $how")
+    private fun routeEnded(route: LinkTransport) {
+        routes.remove(route)?.let(::quietlyClose)
+        val linkEnded = claimed.get() && route == transport
+        if (linkEnded || (!claimed.get() && routes.isEmpty())) mainHandler.post { stopSelf() }
     }
 
-    private fun serve(input: InputStream, output: OutputStream) {
+    private fun serve(route: LinkTransport, input: InputStream, output: OutputStream) {
         val frames = FrameReader()
-        val fileServer = FileServer(deviceName = deviceName(), onFileChanged = { file ->
-            MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
-        })
-        server = fileServer
+        var fileServer: FileServer? = null
 
         val buffer = ByteArray(16 * 1024)
 
@@ -232,7 +288,14 @@ class LinkService : Service() {
                         Log.w(TAG, "Dropped an unreadable message: ${e.message}")
                         continue
                     }
-                    if (!pcSeen) pcFound()
+                    if (fileServer == null) {
+                        if (!claim(route)) return
+                        fileServer = FileServer(deviceName = deviceName(), onFileChanged = { file ->
+                            MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
+                        })
+                        server = fileServer
+                        pcFound()
+                    }
                     if (request.hasPing()) {
                         if (request.ping.hostName.isNotEmpty()) hostName = request.ping.hostName
                         usbSpeed = request.ping.usbSpeed
@@ -240,7 +303,13 @@ class LinkService : Service() {
 
                     // A bug in one request should not crash - reply with just the ID.
                     handlingRequest = true
-                    val reply = try {
+                    val goodbye = sayingGoodbye
+                    val reply = if (goodbye) {
+                        Packet.newBuilder()
+                            .setRequestId(request.requestId)
+                            .setGoodbye(Goodbye.getDefaultInstance())
+                            .build()
+                    } else try {
                         fileServer.handle(request)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to handle request ${request.requestId}", e)
@@ -254,8 +323,8 @@ class LinkService : Service() {
                     handlingRequest = false
                     lastActivityMs = System.currentTimeMillis()
 
-                    if (request.hasGoodbye()) {
-                        Log.i(TAG, "The PC disconnected")
+                    if (goodbye || request.hasGoodbye()) {
+                        Log.i(TAG, if (goodbye) "Told the PC goodbye" else "The PC disconnected")
                         pcSaidGoodbye = true
                         break
                     }
@@ -272,12 +341,11 @@ class LinkService : Service() {
         }
 
         try {
-            fileServer.close()
+            fileServer?.close()
         } catch (e: IOException) {
             Log.w(TAG, "Couldn't sync the file being written: ${e.message}")
         }
         server = null
-        mainHandler.post { stopSelf() }
     }
 
     /** The accessory stays open after the PC leaves */
@@ -297,11 +365,13 @@ class LinkService : Service() {
     private fun publishStatus() {
         if (!running) return
         if (!pcSeen) {
-            if (transport == LinkTransport.TETHERING && Tethering.address() != tetherAddress) {
+            if (routes.containsKey(LinkTransport.TETHERING) && Tethering.address() != tetherAddress) {
                 Log.i(TAG, "USB tethering ended")
-                running = false
-                mainHandler.post { stopSelf() }
-                return
+                routes[LinkTransport.TETHERING]?.let(::quietlyClose)
+            }
+            if (routes.containsKey(LinkTransport.ADB) && !Adb.available(this)) {
+                Log.i(TAG, "USB debugging ended")
+                routes[LinkTransport.ADB]?.let(::quietlyClose)
             }
 
             LinkState.publish(
@@ -356,7 +426,7 @@ class LinkService : Service() {
     private val detachReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             Log.i(TAG, "Accessory detached")
-            stopSelf()
+            routes[LinkTransport.ACCESSORY]?.let(::quietlyClose)
         }
     }
 
@@ -430,6 +500,20 @@ class LinkService : Service() {
             .build()
     }
 
+    private fun quietlyClose(handle: Closeable) {
+        try {
+            handle.close()
+        } catch (_: IOException) {
+        }
+    }
+
+    private fun shutdown(fd: java.io.FileDescriptor) {
+        try {
+            Os.shutdown(fd, OsConstants.SHUT_RDWR)
+        } catch (_: ErrnoException) {
+        }
+    }
+
     /** The name set in Settings > About phone, else the model. Used for the drive label */
     private fun deviceName(): String {
         val named = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
@@ -455,8 +539,11 @@ class LinkService : Service() {
 
         /** The PC pings every 3s when idle, 1 reply can take up to 15s */
         private const val PC_SILENCE_TIMEOUT_MS = 20_000L
+        /** How long to wait for a PC request to carry the goodbye before closing anyway. */
+        private const val GOODBYE_GRACE_MS = 5_000L
         private const val ACTION_STOP = "dev.wilsoon.windroidfs.action.DISCONNECT"
         private const val ACTION_TETHER = "dev.wilsoon.windroidfs.action.TETHER"
+        private const val ACTION_ADB = "dev.wilsoon.windroidfs.action.ADB"
 
         fun connect(context: Context, accessory: UsbAccessory) {
             val intent = Intent(context, LinkService::class.java).putExtra(UsbManager.EXTRA_ACCESSORY, accessory)
@@ -469,8 +556,14 @@ class LinkService : Service() {
             ContextCompat.startForegroundService(context, intent)
         }
 
+        /** Call from the visible activity, while [Adb.available]. */
+        fun listenOnAdb(context: Context) {
+            val intent = Intent(context, LinkService::class.java).setAction(ACTION_ADB)
+            ContextCompat.startForegroundService(context, intent)
+        }
+
         fun disconnect(context: Context) {
-            context.stopService(Intent(context, LinkService::class.java))
+            context.startService(Intent(context, LinkService::class.java).setAction(ACTION_STOP))
         }
     }
 }
