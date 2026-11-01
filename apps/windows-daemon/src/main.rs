@@ -6,7 +6,7 @@ use windroidfs::ipc::transport::{self, send};
 use windroidfs::ipc::{Request, Response};
 use windroidfs::phone::{MAX_READ, MAX_WRITE, PhoneClient, PhoneError};
 use windroidfs::session::{self, Ended, Event, LinkChoice, Options, Route, Stop};
-use windroidfs::{instance, logging};
+use windroidfs::{instance, logging, pairing, wifi};
 
 /// After the phone disconnects, how often and how many times to look for it coming back before giving up and exiting.
 const RETURN_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -17,6 +17,10 @@ fn main() -> rusb::Result<()> {
 
     if std::env::args().nth(1).as_deref() == Some("restore-drivers") {
         restore_drivers_command();
+        return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some("pair") {
+        pair_command();
         return Ok(());
     }
 
@@ -235,6 +239,35 @@ fn report(what: &str, bytes: u64, took: Duration, requests: u64) {
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
+}
+
+/// Pair with a phone over Wi-Fi by comparing a code, for phones that can't be plugged in.
+fn pair_command() {
+    let identity = match wifi::identity() {
+        Ok(identity) => identity,
+        Err(e) => {
+            println!("❌ No Wi-Fi identity for this PC: {e}");
+            return;
+        }
+    };
+    println!(
+        "🔎 Looking for a phone waiting to pair (Local Wi-Fi → Pair a new PC on the phone)..."
+    );
+    let confirm = |name: &str, code: &str| {
+        println!("\n📱 {name} wants to pair. Its screen should show:\n\n      {code}\n");
+        print!("Same code on the phone? [y/N] ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        answer.trim().eq_ignore_ascii_case("y")
+    };
+    match pairing::pair_by_code(&identity, &confirm) {
+        Ok(phone) => println!(
+            "📶 Paired with {}. Connect with `windows-daemon --wifi`.",
+            phone.name
+        ),
+        Err(why) => println!("❌ {why}"),
+    }
 }
 
 fn restore_drivers_command() {

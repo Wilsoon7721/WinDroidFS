@@ -11,8 +11,22 @@ data class DashboardUiState(
     val localIpAddress: String? = null,
     val tcpPort: Int = 9999,
     // null = idle (show the setup cards), non-null = a PC is connected (show live dashboard)
-    val session: ActiveSession? = null
+    val session: ActiveSession? = null,
+    // PCs allowed in over Wi-Fi
+    val pairedPcs: List<PairedPcItem> = emptyList(),
+    // null = not pairing by code
+    val pairing: PairingUi? = null
 )
+
+// [id] is the certificate's fingerprint
+data class PairedPcItem(val name: String, val id: String)
+
+// Pairing by code, as the dialog shows it
+sealed interface PairingUi {
+    data object Waiting : PairingUi
+    data class Confirm(val pcName: String, val code: String, val answered: Boolean = false) : PairingUi
+    data class Finished(val paired: Boolean, val message: String) : PairingUi
+}
 
 // A live connection to the PC
 data class ActiveSession(

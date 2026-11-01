@@ -89,6 +89,7 @@ class LinkService : Service() {
     @Volatile private var transport = LinkTransport.ACCESSORY
     @Volatile private var tetherAddress: InetAddress? = null
     @Volatile private var wifiAddress: InetAddress? = null
+    @Volatile private var wifiAdvert: Advert? = null
     private var detachRegistered = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
@@ -149,6 +150,8 @@ class LinkService : Service() {
         running = false
         routes.values.forEach(::quietlyClose)
         routes.clear()
+        wifiAdvert?.stop()
+        wifiAdvert = null
         ticker?.shutdownNow()
         ticker = null
         if (detachRegistered) unregisterReceiver(detachReceiver)
@@ -239,6 +242,12 @@ class LinkService : Service() {
             return
         }
         wifiAddress = address
+        val name = deviceName()
+        wifiAdvert?.stop()
+        wifiAdvert = Advert(this, Wifi.SERVICE_TYPE, name, Wifi.PORT, mapOf(
+            "id" to Wifi.fingerprint(Wifi.certificate().encoded),
+            "name" to name,
+        ))
         offer(LinkTransport.WIFI, server) {
             var client: SSLSocket
             while (true) {
@@ -302,6 +311,10 @@ class LinkService : Service() {
 
     private fun routeEnded(route: LinkTransport) {
         routes.remove(route)?.let(::quietlyClose)
+        if (route == LinkTransport.WIFI) {
+            wifiAdvert?.stop()
+            wifiAdvert = null
+        }
         if (claimed.get() && route == transport) {
             mainHandler.post(::linkEnded)
         } else if (!claimed.get() && routes.isEmpty()) {
@@ -649,14 +662,7 @@ class LinkService : Service() {
     }
 
     /** The name set in Settings > About phone, else the model. Used for the drive label */
-    private fun deviceName(): String {
-        val named = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
-            Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
-        } else {
-            null
-        }
-        return named?.takeIf { it.isNotBlank() } ?: Build.MODEL.orEmpty()
-    }
+    private fun deviceName() = Wifi.deviceName(this)
 
     private fun Intent.accessoryExtra(): UsbAccessory? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

@@ -29,6 +29,7 @@ dav-server = "0.5.8"
 futures-util = "0.3.34"
 hyper = { version = "0.14", features = ["server", "tcp", "http1"] }
 log = "0.4"
+mdns-sd = "0.21.6"
 prost = "0.14.4"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rusb = "0.9.4"

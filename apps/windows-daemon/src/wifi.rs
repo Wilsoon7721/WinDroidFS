@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, ring};
@@ -17,6 +18,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IDENTITY_KEY: &str = "wifi-identity.key";
 const IDENTITY_CERT: &str = "wifi-identity.der";
 const PAIRED_FILE: &str = "paired-phones.txt";
+/// What the phone app advertises while waiting on Wi-Fi. Must match SERVICE_TYPE in Wifi.kt.
+const PHONE_SERVICE: &str = "_windroidfs._tcp.local.";
+/// How long to listen for phones answering on the network.
+const BROWSE_WAIT: Duration = Duration::from_millis(1500);
 
 /// This PC's TLS identity, made once. A phone paired with it accepts only this certificate.
 pub struct Identity {
@@ -142,30 +147,103 @@ fn write_paired(phones: &[PairedPhone]) -> io::Result<()> {
     fs::write(dir.join(PAIRED_FILE), text)
 }
 
+/// A phone answering on the network.
+#[derive(Clone, Debug)]
+pub struct Advert {
+    /// [`fingerprint`] of its certificate.
+    pub id: String,
+    pub name: String,
+    pub addresses: Vec<SocketAddr>,
+}
+
+/// Phones advertising `service` (mDNS / DNS-SD), listened for for `wait`.
+pub fn browse(service: &str, wait: Duration) -> Vec<Advert> {
+    let Ok(mdns) = mdns_sd::ServiceDaemon::new() else {
+        return Vec::new();
+    };
+    let Ok(events) = mdns.browse(service) else {
+        let _ = mdns.shutdown();
+        return Vec::new();
+    };
+    let deadline = Instant::now() + wait;
+    let mut found: Vec<Advert> = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(event) = events.recv_timeout(left) else {
+            break;
+        };
+        if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+            let id = info
+                .get_property_val_str("id")
+                .unwrap_or_default()
+                .to_string();
+            let name = info
+                .get_property_val_str("name")
+                .unwrap_or("Phone")
+                .to_string();
+            let addresses = info
+                .get_addresses_v4()
+                .into_iter()
+                .map(|ip| SocketAddr::from((ip, info.get_port())))
+                .collect();
+            found.retain(|f| f.id != id);
+            found.push(Advert {
+                id,
+                name,
+                addresses,
+            });
+        }
+    }
+    let _ = mdns.shutdown();
+    found
+}
+
 /// Whether some paired phone is listening on Wi-Fi right now. Only knocks: no TLS.
 pub fn reachable() -> bool {
+    let seen = browse(PHONE_SERVICE, BROWSE_WAIT);
     paired_phones().iter().any(|phone| {
-        addresses(phone)
+        addresses(phone, &seen)
             .iter()
             .any(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).is_ok())
     })
 }
 
-fn addresses(phone: &PairedPhone) -> Vec<SocketAddr> {
-    phone
+/// Where to try `phone`: where it's advertising now, then where it was last seen.
+fn addresses(phone: &PairedPhone, seen: &[Advert]) -> Vec<SocketAddr> {
+    let id = fingerprint(&phone.certificate);
+    let mut all: Vec<SocketAddr> = seen
+        .iter()
+        .filter(|a| a.id == id)
+        .flat_map(|a| a.addresses.iter().copied())
+        .collect();
+    for addr in phone
         .addresses
         .iter()
         .filter_map(|a| (a.as_str(), phone.port).to_socket_addrs().ok())
         .flatten()
-        .collect()
+    {
+        if !all.contains(&addr) {
+            all.push(addr);
+        }
+    }
+    all
 }
 
 /// The first paired phone that answers over Wi-Fi, with the TLS handshake done: each side proved it holds the paired key.
 pub fn connect(identity: &Identity) -> Option<(PairedPhone, SocketAddr, TlsStream)> {
-    for phone in paired_phones() {
-        for addr in addresses(&phone) {
-            match connect_to(identity, &phone, addr) {
-                Ok(stream) => return Some((phone, addr, stream)),
+    let seen = browse(PHONE_SERVICE, BROWSE_WAIT);
+    for mut phone in paired_phones() {
+        for addr in addresses(&phone, &seen) {
+            match connect_to(identity, Some(&phone.certificate), addr) {
+                Ok(stream) => {
+                    // Found somewhere new: remember it for next time.
+                    let ip = addr.ip().to_string();
+                    if phone.addresses.first() != Some(&ip) {
+                        phone.addresses.retain(|a| *a != ip);
+                        phone.addresses.insert(0, ip);
+                        let _ = save_paired(phone.clone());
+                    }
+                    return Some((phone, addr, stream));
+                }
                 Err(e) => log::debug!("Wi-Fi: {} at {addr}: {e}", phone.name),
             }
         }
@@ -173,14 +251,19 @@ pub fn connect(identity: &Identity) -> Option<(PairedPhone, SocketAddr, TlsStrea
     None
 }
 
-fn connect_to(identity: &Identity, phone: &PairedPhone, addr: SocketAddr) -> io::Result<TlsStream> {
+/// TLS 1.3 to `addr`, showing this PC's certificate. `pinned`: the only certificate the phone may show; any, while pairing by code.
+pub(crate) fn connect_to(
+    identity: &Identity,
+    pinned: Option<&[u8]>,
+    addr: SocketAddr,
+) -> io::Result<TlsStream> {
     let provider = Arc::new(ring::default_provider());
     let config = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(io::Error::other)?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinned {
-            certificate: phone.certificate.clone(),
+            certificate: pinned.map(<[u8]>::to_vec),
             provider,
         }))
         .with_client_auth_cert(
@@ -200,10 +283,11 @@ fn connect_to(identity: &Identity, phone: &PairedPhone, addr: SocketAddr) -> io:
     Ok(StreamOwned::new(conn, sock))
 }
 
-/// Trusts one certificate, the one swapped while paired over USB, and nothing else. No CA, no names.
+/// Trusts one certificate, the one swapped when pairing, and nothing else. No CA, no names.
+/// `None` only while pairing by code, where comparing the code is the check.
 #[derive(Debug)]
 struct Pinned {
-    certificate: Vec<u8>,
+    certificate: Option<Vec<u8>>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -216,7 +300,11 @@ impl ServerCertVerifier for Pinned {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if end_entity.as_ref() == self.certificate.as_slice() {
+        if self
+            .certificate
+            .as_ref()
+            .is_none_or(|pinned| end_entity.as_ref() == pinned.as_slice())
+        {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General("not the paired phone".into()))

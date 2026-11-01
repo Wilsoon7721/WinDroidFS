@@ -1,8 +1,14 @@
 package dev.wilsoon.windroidfs.link
 
 import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.Build
+import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
+import dev.wilsoon.windroidfs.ui.PairedPcItem
 import java.io.File
 import java.math.BigInteger
 import java.net.Inet4Address
@@ -12,6 +18,7 @@ import java.net.Socket
 import java.net.SocketException
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.Principal
 import java.security.PrivateKey
 import java.security.cert.CertificateException
@@ -24,6 +31,9 @@ import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.X509ExtendedKeyManager
 import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /** A PC paired over USB. Only it gets past the TLS handshake on Wi-Fi. */
 class PairedPc(val name: String, val certificate: ByteArray)
@@ -31,6 +41,9 @@ class PairedPc(val name: String, val certificate: ByteArray)
 object Wifi {
     /** Tethering's port, on the Wi-Fi address instead. */
     const val PORT = Tethering.PORT
+
+    /** Advertised while waiting on Wi-Fi, so the PC finds this phone wherever the router puts it. Must match PHONE_SERVICE in wifi.rs. */
+    const val SERVICE_TYPE = "_windroidfs._tcp"
 
     private const val KEY_ALIAS = "windroidfs-wifi"
     private const val PAIRED_FILE = "paired-pcs.txt"
@@ -43,6 +56,20 @@ object Wifi {
             ?.firstOrNull { it is Inet4Address && !it.isLoopbackAddress && !it.isLinkLocalAddress }
     } catch (_: SocketException) {
         null
+    }
+
+    /** Short and stable, for telling certificates apart. Must match fingerprint in wifi.rs. */
+    fun fingerprint(certificate: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(certificate).take(8).joinToString("") { "%02x".format(it) }
+
+    /** The name set in Settings > About phone, else the model. */
+    fun deviceName(context: Context): String {
+        val named = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+            Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
+        } else {
+            null
+        }
+        return named?.takeIf { it.isNotBlank() } ?: Build.MODEL.orEmpty()
     }
 
     /** On Wi-Fi with a PC to wait for. */
@@ -82,9 +109,10 @@ object Wifi {
         write(context, others + PairedPc(name.replace(Regex("[\t\r\n]"), " "), certificate))
     }
 
+    /** [id] is the PC's [fingerprint]. */
     @Synchronized
-    fun forget(context: Context, certificate: ByteArray) {
-        write(context, pairedPcs(context).filterNot { it.certificate.contentEquals(certificate) })
+    fun forget(context: Context, id: String) {
+        write(context, pairedPcs(context).filterNot { fingerprint(it.certificate) == id })
     }
 
     private fun write(context: Context, pcs: List<PairedPc>) {
@@ -95,13 +123,14 @@ object Wifi {
 
     private fun pairedFile(context: Context) = File(context.filesDir, PAIRED_FILE)
 
-    /** TLS 1.3 on [address], and the PC must show a paired certificate. */
-    fun serverSocket(context: Context, address: InetAddress): SSLServerSocket {
+    /** TLS 1.3 on [address], and the PC must show a paired certificate. [anyPc] only for pairing by code, where comparing codes is the check. */
+    fun serverSocket(context: Context, address: InetAddress, port: Int = PORT, anyPc: Boolean = false): SSLServerSocket {
         val chain = arrayOf(certificate())
         val key = keyStore().getKey(KEY_ALIAS, null) as PrivateKey
+        val trust = if (anyPc) AnyPc else PairedTrust(context.applicationContext)
         val tls = SSLContext.getInstance("TLS")
-        tls.init(arrayOf(IdentityKeys(key, chain)), arrayOf(PairedTrust(context.applicationContext)), null)
-        return (tls.serverSocketFactory.createServerSocket(PORT, 1, address) as SSLServerSocket).apply {
+        tls.init(arrayOf(IdentityKeys(key, chain)), arrayOf(trust), null)
+        return (tls.serverSocketFactory.createServerSocket(port, 1, address) as SSLServerSocket).apply {
             needClientAuth = true
             enabledProtocols = arrayOf("TLSv1.3")
         }
@@ -137,5 +166,61 @@ object Wifi {
             throw CertificateException("This side only checks PCs")
 
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+
+    private object AnyPc : X509TrustManager {
+        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+            if (chain.isNullOrEmpty()) throw CertificateException("No certificate")
+        }
+
+        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) =
+            throw CertificateException("This side only checks PCs")
+
+        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+}
+
+/** Announces a service on the local network (DNS-SD) until [stop]. */
+class Advert(context: Context, type: String, name: String, port: Int, attributes: Map<String, String>) {
+    private val nsd = context.getSystemService(NsdManager::class.java)
+    private val listener = object : NsdManager.RegistrationListener {
+        override fun onServiceRegistered(info: NsdServiceInfo) {}
+        override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
+            Log.w("WinDroid", "Couldn't advertise $type (error $code)")
+        }
+        override fun onServiceUnregistered(info: NsdServiceInfo) {}
+        override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
+    }
+
+    init {
+        val info = NsdServiceInfo().apply {
+            serviceName = name
+            serviceType = type
+            this.port = port
+            attributes.forEach { (key, value) -> setAttribute(key, value) }
+        }
+        nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+    }
+
+    fun stop() {
+        try {
+            nsd.unregisterService(listener)
+        } catch (_: IllegalArgumentException) {
+        }
+    }
+}
+
+/** What the Wi-Fi card shows. */
+data class WifiInfo(val address: String? = null, val pairedPcs: List<PairedPcItem> = emptyList())
+
+object WifiState {
+    private val mutableInfo = MutableStateFlow(WifiInfo())
+    val info: StateFlow<WifiInfo> = mutableInfo.asStateFlow()
+
+    fun refresh(context: Context) {
+        mutableInfo.value = WifiInfo(
+            address = Wifi.address()?.hostAddress,
+            pairedPcs = Wifi.pairedPcs(context).map { PairedPcItem(it.name, Wifi.fingerprint(it.certificate)) },
+        )
     }
 }

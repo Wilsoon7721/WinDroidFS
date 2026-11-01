@@ -164,6 +164,15 @@ impl PhoneClient {
         self.call_within(payload, REPLY_TIMEOUT)
     }
 
+    /// One request and its reply, for exchanges with no method of their own (pairing by code).
+    pub(crate) fn request(
+        &self,
+        payload: Payload,
+        timeout: Duration,
+    ) -> Result<Payload, PhoneError> {
+        self.call_within(payload, timeout)
+    }
+
     /// [`PhoneClient::call`], waiting at most `timeout` for the reply
     fn call_within(&self, payload: Payload, timeout: Duration) -> Result<Payload, PhoneError> {
         if !self.is_connected() {

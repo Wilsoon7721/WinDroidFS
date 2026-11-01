@@ -24,6 +24,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import dev.wilsoon.windroidfs.link.Adb
+import dev.wilsoon.windroidfs.link.CodePairing
+import dev.wilsoon.windroidfs.link.WifiState
 import dev.wilsoon.windroidfs.link.LinkService
 import dev.wilsoon.windroidfs.link.LinkState
 import dev.wilsoon.windroidfs.link.LinkTransport
@@ -133,6 +135,8 @@ class MainActivity : ComponentActivity() {
         var dashboardState by remember { mutableStateOf(DashboardUiState()) }
         var settingsState by remember { mutableStateOf(SettingsUiState()) }
         val linkStatus by LinkState.status.collectAsState()
+        val wifi by WifiState.info.collectAsState()
+        val pairing by CodePairing.state.collectAsState()
 
         when (currentScreen) {
             AppScreen.ONBOARDING -> {
@@ -148,12 +152,24 @@ class MainActivity : ComponentActivity() {
 
             AppScreen.DASHBOARD -> {
                 MainScreen(
-                    state = dashboardState.copy(session = linkStatus?.takeUnless { it.waitingForPc }?.toSession()),
+                    state = dashboardState.copy(
+                        session = linkStatus?.takeUnless { it.waitingForPc }?.toSession(),
+                        localIpAddress = wifi.address,
+                        pairedPcs = wifi.pairedPcs,
+                        pairing = pairing,
+                    ),
                     onMethodSelected = { dashboardState = dashboardState.copy(expandedMethod = it) },
                     onOpenSettings = { currentScreen = AppScreen.SETTINGS },
                     onOpenDeveloperOptions = { openDeveloperOptions() },
                     onOpenTetheringSettings = { openTetheringSettings() },
-                    onTerminateConnection = { LinkService.disconnect(this) }
+                    onTerminateConnection = { LinkService.disconnect(this) },
+                    onPairNewPc = { CodePairing.start(this) },
+                    onForgetPc = { id ->
+                        Wifi.forget(this, id)
+                        WifiState.refresh(this)
+                    },
+                    onPairingAnswer = CodePairing::answer,
+                    onPairingDismiss = CodePairing::dismiss
                 )
             }
 
@@ -245,6 +261,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkForExistingAccessory() {
+        WifiState.refresh(this)
         // Only skip while linked: a service still waiting may have a new route to offer
         if (LinkState.status.value?.waitingForPc == false) return
 

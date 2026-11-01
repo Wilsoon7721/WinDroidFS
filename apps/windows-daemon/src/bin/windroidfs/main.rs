@@ -19,14 +19,14 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PostQuitMessage,
-    PostThreadMessageW, TranslateMessage, WM_APP,
+    DispatchMessageW, GetMessageW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
+    MSG, MessageBoxW, PostQuitMessage, PostThreadMessageW, TranslateMessage, WM_APP,
 };
 use windows_sys::core::BOOL;
 use windroidfs::ipc::transport;
 use windroidfs::session::{self, DriveChoice, Ended, Event, LinkChoice, Options, Stop, UsbSpeed};
 use windroidfs::usb_watch::UsbWatch;
-use windroidfs::{instance, logging};
+use windroidfs::{instance, logging, pairing, wifi};
 
 use settings::Settings;
 
@@ -365,6 +365,8 @@ struct Tray {
     links: Vec<(LinkChoice, CheckMenuItem)>,
     toggles: Vec<Toggle>,
     open_log: MenuItem,
+    pair: MenuItem,
+    forget: MenuItem,
     autostart: CheckMenuItem,
     about: MenuItem,
     quit: MenuItem,
@@ -407,6 +409,9 @@ impl Tray {
         for (_, item) in &links {
             link_menu.append(item)?;
         }
+        let pair = MenuItem::new("Pair a phone over Wi-Fi...", true, None);
+        let forget = MenuItem::new("Forget Wi-Fi phones", true, None);
+        link_menu.append_items(&[&PredefinedMenuItem::separator(), &pair, &forget])?;
 
         let toggle = |text: &str, field: fn(&mut Settings) -> &mut bool, remount: bool| {
             let mut copy = settings.clone();
@@ -483,6 +488,8 @@ impl Tray {
             links,
             toggles,
             open_log,
+            pair,
+            forget,
             autostart,
             about,
             quit,
@@ -522,6 +529,10 @@ impl Tray {
             unsafe { PostQuitMessage(0) };
         } else if id == self.open.id() {
             open_drive(shared);
+        } else if id == self.pair.id() {
+            std::thread::spawn(pair_over_wifi);
+        } else if id == self.forget.id() {
+            forget_wifi_phones();
         } else if id == self.open_log.id() {
             open_log_folder();
         } else if id == self.about.id() {
@@ -652,6 +663,41 @@ fn warn_if_slow(shared: &Shared, speed: UsbSpeed) {
         &format!("USB Type: {}", session::speed_name(speed)),
         &advice,
     );
+}
+
+fn message_box(text: &str, caption: &str, style: u32) -> i32 {
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, caption) = (wide(text), wide(caption));
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style) }
+}
+
+/// On its own thread: finding the phone takes seconds, and the code waits for the user.
+fn pair_over_wifi() {
+    let result = wifi::identity().map_err(|e| e.to_string()).and_then(|identity| {
+        pairing::pair_by_code(&identity, &|name, code| {
+            let text = format!(
+                "{name} wants to pair over Wi-Fi.\n\nYour phone should show this code:\n\n        {code}\n\nDoes it?"
+            );
+            message_box(&text, "Pair a phone", MB_YESNO | MB_ICONQUESTION) == IDYES
+        })
+    });
+    match result {
+        Ok(phone) => notify::show(
+            &format!("Paired with {}", phone.name),
+            "It can connect over Wi-Fi from now on, while the app is open on it.",
+        ),
+        Err(why) => notify::show("Not paired", &why),
+    }
+}
+
+fn forget_wifi_phones() {
+    let text = "Forget every phone paired for Wi-Fi? Each will need pairing again, over USB or with a code.";
+    if message_box(text, "Forget Wi-Fi phones", MB_YESNO | MB_ICONQUESTION) == IDYES {
+        match wifi::forget_all() {
+            Ok(()) => notify::show("Forgot Wi-Fi phones", "Pair again to connect over Wi-Fi."),
+            Err(e) => notify::show("Couldn't forget Wi-Fi phones", &e.to_string()),
+        }
+    }
 }
 
 fn show_about() {

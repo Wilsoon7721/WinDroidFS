@@ -53,7 +53,16 @@ click opens the drive. The menu has:
   otherwise Direct USB), Direct USB only, USB tethering only, or ADB only. Tethering and ADB
   never switch the phone into Accessory Mode, so there's time to turn them on after plugging
   in, and neither needs the driver service. ADB finds `adb.exe` on PATH or in the Android SDK,
-  and the phone only accepts connections from adbd itself, never from other apps.
+  and the phone only accepts connections from adbd itself, never from other apps. Wi-Fi only
+  reaches paired phones, and automatic uses it when no phone is plugged in. The same submenu
+  pairs a phone by code and forgets Wi-Fi phones.
+
+**Wi-Fi** is TLS 1.3 both ways, each side pinned to the other's certificate (`wifi.rs`). Pairing
+swaps the certificates: automatically over any USB link, which already proves which phone it is,
+or by code (`pairing.rs`), where both screens show 6 digits derived from both certificates and a
+nonce from each side, the phone committing to its nonce first so nobody in between can make the
+codes match. The phone advertises `_windroidfs._tcp` (DNS-SD) while it waits, so the PC finds it
+wherever the router puts it.
 - **Drive letter**: automatic (first free from Z: down), or a fixed letter. A taken letter
   falls back to automatic. Changing it while mounted remounts straight away.
 - **Options**: open in Explorer when mounted; read-only; hide dot-files.
@@ -187,7 +196,8 @@ cargo run --bin windroidfs
 | `windroidfs` | The tray app. |
 | `windows-daemon` | Console run: handshake, then mount the phone (WinFsp, else WebDAV). |
 | `windows-daemon --webdav` | Same, but always use the WebDAV mount. |
-| `windows-daemon --tethering` / `--adb` / `--direct-usb` | Same, but only over USB tethering, ADB, or Direct USB (Accessory Mode). Also work with `bench`. |
+| `windows-daemon --tethering` / `--adb` / `--direct-usb` / `--wifi` | Same, but only over that route. Also work with `bench`. |
+| `windows-daemon pair` | Pair a phone over Wi-Fi by comparing a code (phone: Local Wi-Fi → Pair a new PC). |
 | `windows-daemon bench [MiB]` | Connect without mounting and measure ping time, then write and read speed with a temporary file on the phone (128 MiB by default). |
 | `windows-daemon restore-drivers` | Undo every driver swap (asks the service). |
 | `windroidfs-service run` | Foreground service, for development. |

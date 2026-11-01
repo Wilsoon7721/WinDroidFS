@@ -32,7 +32,11 @@ fun MainScreen(
     onOpenSettings: () -> Unit,
     onOpenDeveloperOptions: () -> Unit,
     onOpenTetheringSettings: () -> Unit,
-    onTerminateConnection: () -> Unit
+    onTerminateConnection: () -> Unit,
+    onPairNewPc: () -> Unit = {},
+    onForgetPc: (String) -> Unit = {},
+    onPairingAnswer: (Boolean) -> Unit = {},
+    onPairingDismiss: () -> Unit = {}
 ) {
     var showTerminateDialog by remember { mutableStateOf(false) }
 
@@ -55,7 +59,9 @@ fun MainScreen(
                     state = state,
                     onMethodSelected = onMethodSelected,
                     onOpenDeveloperOptions = onOpenDeveloperOptions,
-                    onOpenTetheringSettings = onOpenTetheringSettings
+                    onOpenTetheringSettings = onOpenTetheringSettings,
+                    onPairNewPc = onPairNewPc,
+                    onForgetPc = onForgetPc
                 )
             } else {
                 ActiveDashboard(
@@ -81,6 +87,8 @@ fun MainScreen(
             onDismiss = { showTerminateDialog = false }
         )
     }
+
+    state.pairing?.let { PairingDialog(it, onAnswer = onPairingAnswer, onDismiss = onPairingDismiss) }
 }
 
 @Composable
@@ -120,7 +128,9 @@ private fun IdleContent(
     state: DashboardUiState,
     onMethodSelected: (ConnectionMethod) -> Unit,
     onOpenDeveloperOptions: () -> Unit,
-    onOpenTetheringSettings: () -> Unit
+    onOpenTetheringSettings: () -> Unit,
+    onPairNewPc: () -> Unit,
+    onForgetPc: (String) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -171,7 +181,7 @@ private fun IdleContent(
                 description = "Wireless transfer via local router.",
                 isExpanded = state.expandedMethod == ConnectionMethod.WIFI,
                 onClick = { onMethodSelected(ConnectionMethod.WIFI) }) {
-                WifiSetupContent(state.localIpAddress, state.tcpPort)
+                WifiSetupContent(state.localIpAddress, state.tcpPort, state.pairedPcs, onPairNewPc, onForgetPc)
             }
         }
     }
@@ -220,10 +230,17 @@ private fun TetheringSetupContent(port: Int, onOpenTetheringSettings: () -> Unit
 }
 
 @Composable
-private fun WifiSetupContent(ipAddress: String?, port: Int) {
+private fun WifiSetupContent(
+    ipAddress: String?,
+    port: Int,
+    pairedPcs: List<PairedPcItem>,
+    onPairNewPc: () -> Unit,
+    onForgetPc: (String) -> Unit
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SetupStep(1, "Connect your phone and PC to the same Wi-Fi network.")
-        SetupStep(2, "Your PC should discover this phone automatically.")
+        SetupStep(2, "Pair once: connect over any USB method, or tap Pair a new PC and compare the code on both screens.")
+        SetupStep(3, "After that, your PC finds this phone by itself while this app is open.")
         // Shown so the user can type it in manually if mDNS discovery fails
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -244,6 +261,27 @@ private fun WifiSetupContent(ipAddress: String?, port: Int) {
                 fontWeight = FontWeight.SemiBold
             )
         }
+        if (pairedPcs.isNotEmpty()) {
+            SectionLabel("Paired PCs")
+            pairedPcs.forEach { pc ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                        .background(WinDroidTheme.colors.surfaceVariant).padding(start = 14.dp, end = 4.dp)
+                ) {
+                    Text(
+                        text = pc.name,
+                        color = WinDroidTheme.colors.textPrimary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { onForgetPc(pc.id) }) {
+                        Text(text = "Forget", color = WinDroidTheme.colors.error)
+                    }
+                }
+            }
+        }
+        SetupActionButton(text = "Pair a new PC", onClick = onPairNewPc)
     }
 }
 

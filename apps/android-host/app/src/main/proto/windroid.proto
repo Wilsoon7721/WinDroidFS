@@ -38,6 +38,14 @@ message Packet {
     // Only over a USB link, which proves who's on the other end: swap TLS certificates so the two can trust each other over Wi-Fi.
     PairRequest pair_request = 21;
     PairResponse pair_response = 22;
+
+    // Pairing over Wi-Fi by comparing a code on both screens, on the phone's pairing port only.
+    PairHello pair_hello = 23;
+    PairCommit pair_commit = 24;
+    PairNonce pair_nonce = 25;
+    PairReveal pair_reveal = 26;
+    PairConfirm pair_confirm = 27;
+    PairResult pair_result = 28;
   }
 }
 
@@ -70,6 +78,36 @@ message PairResponse {
   uint32 wifi_port = 4;
   // Where the phone is on Wi-Fi right now, if it's on Wi-Fi.
   repeated string wifi_addresses = 5;
+}
+
+// Pairing by code. Both sides already have each other's certificate from the TLS handshake. The phone commits
+// to its nonce before seeing the PC's, so nobody in the middle can steer the 6-digit code both screens show.
+// Hashes: SHA-256 of a label then each part as a 4-byte big-endian length and the bytes (pairing.rs, CodePairing.kt).
+message PairHello {
+  string host_name = 1;
+}
+
+message PairCommit {
+  bytes commitment = 1;  // "windroidfs-commit": phone certificate, PC certificate, phone nonce
+  string device_name = 2;
+}
+
+message PairNonce {
+  bytes nonce = 1;  // the PC's, 32 bytes
+}
+
+message PairReveal {
+  bytes nonce = 1;  // the phone's. Code: "windroidfs-code": PC cert, phone cert, PC nonce, phone nonce
+}
+
+message PairConfirm {
+  bool accepted = 1;  // whether the PC's user saw the same code
+}
+
+message PairResult {
+  bool success = 1;  // both users confirmed
+  string error_message = 2;
+  uint32 wifi_port = 3;
 }
 
 // Connection Testing
