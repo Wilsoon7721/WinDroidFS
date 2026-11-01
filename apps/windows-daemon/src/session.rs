@@ -15,7 +15,7 @@ use crate::driver;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
-use crate::{adb, tether, webdav, winfsp_fs};
+use crate::{adb, tether, webdav, wifi, winfsp_fs};
 
 pub use crate::windroid::UsbSpeed;
 pub use crate::winfsp_fs::DriveChoice;
@@ -50,7 +50,7 @@ pub struct Options {
 /// Which link to use with a phone that could do either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinkChoice {
-    /// USB tethering if it's on, then adb if it sees the phone, otherwise Direct USB.
+    /// USB tethering if it's on, then adb if it sees the phone, otherwise Direct USB. Wi-Fi when no phone is plugged in.
     #[default]
     Auto,
     /// Direct USB (Accessory Mode) even when tethering is on, which it turns off.
@@ -59,6 +59,8 @@ pub enum LinkChoice {
     Tethering,
     /// Only through adb: needs USB debugging on and adb on this PC. No driver swap, and MTP keeps working.
     Adb,
+    /// Only over Wi-Fi, to a phone paired while it was plugged in.
+    Wifi,
 }
 
 /// Whether connecting may need the driver service. Only Direct USB swaps drivers.
@@ -66,7 +68,7 @@ pub fn needs_service(link: LinkChoice) -> bool {
     match link {
         LinkChoice::Auto => tether::phone_address().is_none() && adb::phone().is_none(),
         LinkChoice::DirectUsb => true,
-        LinkChoice::Tethering | LinkChoice::Adb => false,
+        LinkChoice::Tethering | LinkChoice::Adb | LinkChoice::Wifi => false,
     }
 }
 
@@ -178,9 +180,15 @@ pub fn phone_present(link: LinkChoice) -> bool {
     match link {
         LinkChoice::Tethering => return tethered,
         LinkChoice::Adb => return adb::phone().is_some(),
+        LinkChoice::Wifi => return wifi::reachable(),
         LinkChoice::Auto if tethered => return true,
         _ => {}
     }
+    usb_phone_present() || (link == LinkChoice::Auto && wifi::reachable())
+}
+
+/// An Android phone on USB, in its normal identity or Accessory Mode.
+fn usb_phone_present() -> bool {
     let Ok(context) = Context::new() else {
         return false;
     };
@@ -203,10 +211,31 @@ pub fn run(options: &Options, stop: &Stop, on_event: &dyn Fn(Event)) -> Ended {
     }
 }
 
+/// How the PC reached the phone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    DirectUsb,
+    Tethering,
+    Adb,
+    Wifi,
+}
+
+impl Route {
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::DirectUsb => "Direct USB",
+            Route::Tethering => "USB tethering",
+            Route::Adb => "ADB",
+            Route::Wifi => "Wi-Fi",
+        }
+    }
+}
+
 /// A phone that's linked and answering, but not mounted.
 pub struct Connected {
     pub phone: PhoneClient,
     pub device_name: String,
+    pub route: Route,
     /// Held as long as the link: dropping it removes the adb forward.
     pub forward: Option<adb::Forward>,
 }
@@ -240,6 +269,7 @@ fn connect_and_serve(
             phone,
             device_name,
             forward,
+            ..
         }) => {
             let adb = forward.as_ref().map(|f| f.phone().clone());
             let ended = serve(phone, &device_name, adb, options, stop, on_event);
@@ -259,9 +289,13 @@ fn connect_phone(
     log::info!("Scanning for an Android device...");
     on_event(Event::Connecting);
 
+    if link == LinkChoice::Wifi {
+        return Ok(connect_wifi(stop, on_event));
+    }
+
     // Before USB: the AOA handshake would take the phone out of tethering.
     let tethered = match link {
-        LinkChoice::DirectUsb | LinkChoice::Adb => None,
+        LinkChoice::DirectUsb | LinkChoice::Adb | LinkChoice::Wifi => None,
         LinkChoice::Auto | LinkChoice::Tethering => tether::phone_address(),
     };
     if link == LinkChoice::Tethering && tethered.is_none() {
@@ -286,7 +320,7 @@ fn connect_phone(
             Err(e) => return Ok(Err(failed(format!("Couldn't set up the link: {e}")))),
         };
         log::info!("⚡ Connected over USB tethering.");
-        return Ok(answering(phone, stop, on_event));
+        return Ok(answering(phone, stop, on_event, Route::Tethering));
     }
 
     // Also before Direct USB, which needs the adb server to let go of the phone
@@ -303,6 +337,10 @@ fn connect_phone(
             }
             None => {}
         }
+    }
+
+    if link == LinkChoice::Auto && !usb_phone_present() && wifi::reachable() {
+        return Ok(connect_wifi(stop, on_event));
     }
 
     // Push the phone into AOA mode
@@ -365,21 +403,26 @@ fn connect_phone(
     if let Some(advice) = speed_advice(speed) {
         log::warn!("🐢 {advice}");
     }
-    Ok(answering(phone, stop, on_event))
+    Ok(answering(phone, stop, on_event, Route::DirectUsb))
 }
 
-/// Prove the link works before mounting anything.
+/// Prove the link works before mounting anything. Over USB, also `pair` for Wi-Fi.
 fn answering(
     phone: PhoneClient,
     stop: &Stop,
     on_event: &dyn Fn(Event),
+    route: Route,
 ) -> Result<Connected, Ended> {
     match wait_for_app(&phone, stop, on_event) {
         Some(device_name) => {
             log::info!("🏓 Phone responded to Ping! The link is active.");
+            if route != Route::Wifi {
+                pair_for_wifi(&phone, &device_name);
+            }
             Ok(Connected {
                 phone,
                 device_name,
+                route,
                 forward: None,
             })
         }
@@ -387,6 +430,49 @@ fn answering(
         None if phone.closed_by_phone() => Err(Ended::ClosedByPhone),
         None => Err(Ended::PhoneLost),
     }
+}
+
+/// Swap certificates over this USB link, so the phone can be reached over Wi-Fi later. Older phone apps can't, which is fine.
+fn pair_for_wifi(phone: &PhoneClient, device_name: &str) {
+    let identity = match wifi::identity() {
+        Ok(identity) => identity,
+        Err(e) => {
+            log::warn!("⚠️  No Wi-Fi identity for this PC, so no pairing: {e}");
+            return;
+        }
+    };
+    let resp = match phone.pair(&identity.certificate) {
+        Ok(resp) if !resp.certificate.is_empty() => resp,
+        Ok(_) => return,
+        Err(e) => {
+            log::debug!("Wi-Fi pairing skipped: {e}");
+            return;
+        }
+    };
+    let paired = wifi::PairedPhone {
+        name: device_name.to_string(),
+        certificate: resp.certificate,
+        port: resp.wifi_port as u16,
+        addresses: resp.wifi_addresses,
+    };
+    match wifi::save_paired(paired) {
+        Ok(true) => log::info!("📶 Paired with {device_name} for Wi-Fi."),
+        Ok(false) => {}
+        Err(e) => log::warn!("⚠️  Couldn't save the Wi-Fi pairing: {e}"),
+    }
+}
+
+/// Over Wi-Fi to a paired phone. TLS both ways, each side pinned to the certificate swapped over USB.
+fn connect_wifi(stop: &Stop, on_event: &dyn Fn(Event)) -> Result<Connected, Ended> {
+    let identity = wifi::identity()
+        .map_err(|e| failed(format!("Couldn't load this PC's Wi-Fi identity: {e}")))?;
+    let Some((paired, addr, stream)) = wifi::connect(&identity) else {
+        return Err(failed(
+            "No paired phone answered over Wi-Fi. Pair it by connecting once over USB, and keep the app open on the phone.",
+        ));
+    };
+    log::info!("⚡ Connected over Wi-Fi to {} at {addr}.", paired.name);
+    answering(PhoneClient::over_tls(stream), stop, on_event, Route::Wifi)
 }
 
 /// Connect to the phone app through adb, waiting for it to be opened. Retries, as adb takes the connection even when the app isn't listening.
@@ -402,7 +488,7 @@ fn connect_adb(
             && client.ping().is_ok()
         {
             log::info!("⚡ Connected over ADB.");
-            let mut connected = answering(client, stop, on_event)?;
+            let mut connected = answering(client, stop, on_event, Route::Adb)?;
             connected.forward = Some(forward);
             return Ok(connected);
         }

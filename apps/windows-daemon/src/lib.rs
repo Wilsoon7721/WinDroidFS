@@ -10,6 +10,7 @@ pub mod session;
 pub mod tether;
 pub mod usb_watch;
 pub mod webdav;
+pub mod wifi;
 pub mod winfsp_fs;
 
 /// The phone protocol, generated from `packages/binary-protocol/windroid.proto`.

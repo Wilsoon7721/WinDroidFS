@@ -94,6 +94,7 @@ impl Settings {
             LinkChoice::DirectUsb => "direct_usb",
             LinkChoice::Tethering => "tethering",
             LinkChoice::Adb => "adb",
+            LinkChoice::Wifi => "wifi",
         };
         format!(
             "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\n",
@@ -118,12 +119,13 @@ fn parse_drive(value: &str) -> DriveChoice {
     }
 }
 
-/// "direct_usb", "tethering" or "adb". Anything else is automatic.
+/// "direct_usb", "tethering", "adb" or "wifi". Anything else is automatic.
 fn parse_link(value: &str) -> LinkChoice {
     match value {
         "direct_usb" => LinkChoice::DirectUsb,
         "tethering" => LinkChoice::Tethering,
         "adb" => LinkChoice::Adb,
+        "wifi" => LinkChoice::Wifi,
         _ => LinkChoice::Auto,
     }
 }

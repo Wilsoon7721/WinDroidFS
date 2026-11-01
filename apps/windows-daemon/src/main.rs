@@ -5,7 +5,7 @@ use windroidfs::android::{is_aoa_identity, is_normal_android_identity};
 use windroidfs::ipc::transport::{self, send};
 use windroidfs::ipc::{Request, Response};
 use windroidfs::phone::{MAX_READ, MAX_WRITE, PhoneClient, PhoneError};
-use windroidfs::session::{self, Ended, Event, LinkChoice, Options, Stop};
+use windroidfs::session::{self, Ended, Event, LinkChoice, Options, Route, Stop};
 use windroidfs::{instance, logging};
 
 /// After the phone disconnects, how often and how many times to look for it coming back before giving up and exiting.
@@ -29,6 +29,8 @@ fn main() -> rusb::Result<()> {
             LinkChoice::DirectUsb
         } else if flag("--adb") {
             LinkChoice::Adb
+        } else if flag("--wifi") {
+            LinkChoice::Wifi
         } else {
             LinkChoice::Auto
         },
@@ -129,9 +131,10 @@ const BENCH_DEFAULT_MIB: usize = 128;
 
 /// Measure the link without mounting: request round-trip time, then write and read speed.
 fn bench_command(link: LinkChoice) {
+    // The first number after `bench`, wherever flags like --wifi sit.
     let mib: usize = std::env::args()
-        .nth(2)
-        .and_then(|n| n.parse().ok())
+        .skip(2)
+        .find_map(|a| a.parse().ok())
         .unwrap_or(BENCH_DEFAULT_MIB);
 
     let stop = Stop::new();
@@ -139,10 +142,13 @@ fn bench_command(link: LinkChoice) {
         return; // already explained by session::connect
     };
     let phone = connected.phone;
+    let over = match connected.route {
+        Route::DirectUsb => session::speed_name(phone.usb_speed()),
+        route => route.name(),
+    };
     println!(
-        "\n📏 Benchmarking {} over {}, {mib} MiB test file\n",
-        connected.device_name,
-        session::speed_name(phone.usb_speed())
+        "\n📏 Benchmarking {} over {over}, {mib} MiB test file\n",
+        connected.device_name
     );
 
     if let Err(e) = bench(&phone, mib) {

@@ -34,6 +34,10 @@ message Packet {
 
     // The PC is disconnecting on purpose. The phone echoes it and ends the link.
     Goodbye goodbye = 20;
+
+    // Only over a USB link, which proves who's on the other end: swap TLS certificates so the two can trust each other over Wi-Fi.
+    PairRequest pair_request = 21;
+    PairResponse pair_response = 22;
   }
 }
 
@@ -52,6 +56,21 @@ enum ErrorCode {
 }
 
 message Goodbye {}
+
+// Wi-Fi pairing. Each side keeps the other's certificate (DER) and accepts only it.
+message PairRequest {
+  bytes certificate = 1;
+  string host_name = 2;
+}
+
+message PairResponse {
+  bool success = 1;
+  string error_message = 2;
+  bytes certificate = 3;
+  uint32 wifi_port = 4;
+  // Where the phone is on Wi-Fi right now, if it's on Wi-Fi.
+  repeated string wifi_addresses = 5;
+}
 
 // Connection Testing
 message Ping {

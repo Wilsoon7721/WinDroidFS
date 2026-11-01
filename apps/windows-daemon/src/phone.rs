@@ -13,8 +13,9 @@ use rusb::{Context, DeviceHandle};
 use crate::windroid::packet::Payload;
 use crate::windroid::{
     CreateRequest, DeleteRequest, DirectoryRequest, ErrorCode, FileInfo, FileReadRequest,
-    FlushRequest, Goodbye, OperationResponse, Packet, Ping, RenameRequest, SetTimesRequest,
-    StatRequest, TruncateRequest, UsbSpeed, VolumeInfoRequest, WriteRequest,
+    FlushRequest, Goodbye, OperationResponse, Packet, PairRequest, PairResponse, Ping,
+    RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UsbSpeed, VolumeInfoRequest,
+    WriteRequest,
 };
 
 /// How long to wait for the phone to answer a request
@@ -107,6 +108,11 @@ impl PhoneClient {
         // Each request waits for its reply, so don't let Nagle hold them back.
         stream.set_nodelay(true)?;
         Ok(Self::spawn(Box::new(Tcp(stream)), UsbSpeed::Unknown))
+    }
+
+    /// The same, over Wi-Fi with the TLS handshake already done (see `wifi::connect`).
+    pub fn over_tls(stream: crate::wifi::TlsStream) -> Self {
+        Self::spawn(Box::new(Tls(stream)), UsbSpeed::Unknown)
     }
 
     fn spawn(transport: Box<dyn Transport>, speed: UsbSpeed) -> Self {
@@ -315,6 +321,21 @@ impl PhoneClient {
         .map(|_| ())
     }
 
+    /// Swap Wi-Fi certificates with the phone. It only agrees over a USB link.
+    pub fn pair(&self, certificate: &[u8]) -> Result<PairResponse, PhoneError> {
+        let reply = self.call(Payload::PairRequest(PairRequest {
+            certificate: certificate.to_vec(),
+            host_name: std::env::var("COMPUTERNAME").unwrap_or_default(),
+        }))?;
+        let Payload::PairResponse(resp) = reply else {
+            return Err(PhoneError::UnexpectedReply);
+        };
+        if !resp.success {
+            return Err(remote_error(ErrorCode::AccessDenied, resp.error_message));
+        }
+        Ok(resp)
+    }
+
     /// Have the phone close and sync a file it has been writing.
     pub fn flush(&self, path: &str) -> Result<(), PhoneError> {
         self.operation(Payload::FlushRequest(FlushRequest {
@@ -391,6 +412,47 @@ impl Transport for Usb {
 
     fn close(&mut self) {
         let _ = self.handle.release_interface(self.interface);
+    }
+}
+
+struct Tls(crate::wifi::TlsStream);
+
+impl Transport for Tls {
+    fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError> {
+        self.0
+            .sock
+            .set_write_timeout(Some(timeout))
+            .map_err(tcp_error)?;
+        self.0.write_all(bytes).map_err(tcp_error)?;
+        self.0.flush().map_err(tcp_error)
+    }
+
+    fn receive(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, PhoneError> {
+        let timeout = timeout.max(Duration::from_millis(1));
+        self.0
+            .sock
+            .set_read_timeout(Some(timeout))
+            .map_err(tcp_error)?;
+        // A timeout mid-record is fine: rustls keeps what it has and carries on next time.
+        match self.0.read(buf) {
+            Ok(0) => Err(PhoneError::Disconnected),
+            Ok(n) => Ok(n),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(0)
+            }
+            Err(e) => Err(tcp_error(e)),
+        }
+    }
+
+    fn close(&mut self) {
+        self.0.conn.send_close_notify();
+        let _ = self.0.flush();
+        let _ = self.0.sock.shutdown(Shutdown::Both);
     }
 }
 

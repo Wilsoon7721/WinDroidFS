@@ -399,6 +399,7 @@ impl Tray {
             (LinkChoice::DirectUsb, "Direct USB only"),
             (LinkChoice::Tethering, "USB tethering only"),
             (LinkChoice::Adb, "ADB only (USB debugging)"),
+            (LinkChoice::Wifi, "Wi-Fi only (paired phones)"),
         ]
         .map(|(choice, text)| (choice, CheckMenuItem::new(text, true, false, None)))
         .to_vec();

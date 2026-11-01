@@ -28,6 +28,7 @@ import dev.wilsoon.windroidfs.link.LinkService
 import dev.wilsoon.windroidfs.link.LinkState
 import dev.wilsoon.windroidfs.link.LinkTransport
 import dev.wilsoon.windroidfs.link.Tethering
+import dev.wilsoon.windroidfs.link.Wifi
 import dev.wilsoon.windroidfs.link.LinkStatus
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
 import dev.wilsoon.windroidfs.ui.*
@@ -180,6 +181,7 @@ class MainActivity : ComponentActivity() {
             LinkTransport.ACCESSORY -> ConnectionMethod.AOA
             LinkTransport.TETHERING -> ConnectionMethod.TETHERING
             LinkTransport.ADB -> ConnectionMethod.ADB
+            LinkTransport.WIFI -> ConnectionMethod.WIFI
         },
         hostName = hostName.ifEmpty { "your PC" },
         uptimeSeconds = uptimeSeconds,
@@ -258,6 +260,7 @@ class MainActivity : ComponentActivity() {
         // Wait on every route there is: the PC picks one
         if (tethered) LinkService.listenOnTethering(this)
         if (Adb.available(this)) LinkService.listenOnAdb(this)
+        if (Wifi.available(this)) LinkService.listenOnWifi(this)
         if (accessory == null) {
             permissionRequested = false
             return

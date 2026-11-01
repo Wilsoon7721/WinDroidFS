@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.net.wifi.WifiManager
 import android.os.PowerManager
 import android.provider.Settings
 import android.system.ErrnoException
@@ -26,16 +27,19 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import dev.wilsoon.windroidfs.MainActivity
 import dev.wilsoon.windroidfs.R
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Goodbye
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Packet
+import dev.wilsoon.windroidfs.protocol.WinDroidProto.PairResponse
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
 import java.io.Closeable
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import javax.net.ssl.SSLSocket
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -84,8 +88,10 @@ class LinkService : Service() {
     private val claimed = AtomicBoolean(false)
     @Volatile private var transport = LinkTransport.ACCESSORY
     @Volatile private var tetherAddress: InetAddress? = null
+    @Volatile private var wifiAddress: InetAddress? = null
     private var detachRegistered = false
     private var wakeLock: PowerManager.WakeLock? = null
+    private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
     private var ticker: ScheduledExecutorService? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -132,6 +138,7 @@ class LinkService : Service() {
         when (intent?.action) {
             ACTION_TETHER -> offerTethering()
             ACTION_ADB -> offerAdb()
+            ACTION_WIFI -> offerWifi()
             else -> intent?.accessoryExtra()?.let(::offerAccessory)
         }
         if (routes.isEmpty()) stopSelf()
@@ -146,6 +153,7 @@ class LinkService : Service() {
         ticker = null
         if (detachRegistered) unregisterReceiver(detachReceiver)
         wakeLock?.takeIf { it.isHeld }?.release()
+        releaseWifi()
         LinkState.publish(null)
         super.onDestroy()
     }
@@ -220,6 +228,39 @@ class LinkService : Service() {
         }
     }
 
+    /** TLS on the Wi-Fi address. Only a paired PC gets past the handshake; anyone else is dropped and the wait goes on. */
+    private fun offerWifi() {
+        if (routes.containsKey(LinkTransport.WIFI) || !Wifi.available(this)) return
+        val address = Wifi.address() ?: return
+        val server = try {
+            Wifi.serverSocket(this, address)
+        } catch (e: Exception) {
+            Log.e(TAG, "Couldn't listen on Wi-Fi at $address", e)
+            return
+        }
+        wifiAddress = address
+        offer(LinkTransport.WIFI, server) {
+            var client: SSLSocket
+            while (true) {
+                client = server.accept() as SSLSocket
+                try {
+                    // Nobody gets to hold the only seat by never finishing the handshake.
+                    client.soTimeout = HANDSHAKE_TIMEOUT_MS
+                    client.startHandshake()
+                    client.soTimeout = 0
+                    break
+                } catch (e: IOException) {
+                    Log.w(TAG, "Refused a Wi-Fi connection from ${client.inetAddress}: ${e.message}")
+                    client.close()
+                }
+            }
+            server.close()
+            routes[LinkTransport.WIFI] = client
+            client.tcpNoDelay = true
+            client.inputStream to client.outputStream
+        }
+    }
+
     /** Wait on [route] in its own thread: [connect] blocks until the PC arrives, and closing [handle] gives up. */
     private fun offer(route: LinkTransport, handle: Closeable, connect: () -> Pair<InputStream, OutputStream>) {
         routes[route] = handle
@@ -272,6 +313,7 @@ class LinkService : Service() {
     private fun linkEnded() {
         wakeLock?.takeIf { it.isHeld }?.release()
         wakeLock = null
+        releaseWifi()
         pcSeen = false
         sayingGoodbye = false
         claimed.set(false)
@@ -295,6 +337,27 @@ class LinkService : Service() {
             ?.let(::offerAccessory)
         offerTethering()
         if (Adb.available(this)) offerAdb()
+        offerWifi()
+    }
+
+    /** Only over USB, which proves which PC this is. Over Wi-Fi anyone could ask. */
+    private fun pair(route: LinkTransport, request: Packet): Packet {
+        val response = PairResponse.newBuilder()
+        if (route == LinkTransport.WIFI) {
+            response.setSuccess(false).setErrorMessage("Pair over USB")
+        } else try {
+            val pc = request.pairRequest
+            Wifi.pair(this, pc.hostName.ifEmpty { "PC" }, pc.certificate.toByteArray())
+            response.setSuccess(true)
+                .setCertificate(ByteString.copyFrom(Wifi.certificate().encoded))
+                .setWifiPort(Wifi.PORT)
+            Wifi.address()?.hostAddress?.let(response::addWifiAddresses)
+            Log.i(TAG, "Paired with ${pc.hostName} for Wi-Fi")
+        } catch (e: Exception) {
+            Log.e(TAG, "Pairing failed", e)
+            response.setSuccess(false).setErrorMessage(e.message ?: "Pairing failed")
+        }
+        return Packet.newBuilder().setRequestId(request.requestId).setPairResponse(response).build()
     }
 
     private fun serve(route: LinkTransport, input: InputStream, output: OutputStream) {
@@ -341,6 +404,8 @@ class LinkService : Service() {
                             .setRequestId(request.requestId)
                             .setGoodbye(Goodbye.getDefaultInstance())
                             .build()
+                    } else if (request.hasPairRequest()) {
+                        pair(route, request)
                     } else try {
                         fileServer.handle(request)
                     } catch (e: Exception) {
@@ -380,11 +445,36 @@ class LinkService : Service() {
         server = null
     }
 
+    /**
+     * Wi-Fi power saving naps between packets, adding 100ms+ to every request, and Explorer sends them one after another.
+     * Low latency only applies while the app is on screen; high performance covers the rest where Android still honours it.
+     */
+    @Suppress("DEPRECATION")
+    private fun holdWifiAwake() {
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return
+        val modes = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(WifiManager.WIFI_MODE_FULL_LOW_LATENCY)
+            add(WifiManager.WIFI_MODE_FULL_HIGH_PERF)
+        }
+        modes.forEach { mode ->
+            wifiLocks += wifi.createWifiLock(mode, "WinDroidFS:wifi").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    private fun releaseWifi() {
+        wifiLocks.forEach { if (it.isHeld) it.release() }
+        wifiLocks.clear()
+    }
+
     /** The accessory stays open after the PC leaves */
     private fun pcFound() {
         connectedAtMs = System.currentTimeMillis()
         lastActivityMs = connectedAtMs
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WinDroidFS:link").apply { acquire() }
+        if (transport == LinkTransport.WIFI) holdWifiAwake()
         pcSeen = true
         Log.d(TAG, "The PC answered")
     }
@@ -404,6 +494,10 @@ class LinkService : Service() {
             if (routes.containsKey(LinkTransport.ADB) && !Adb.available(this)) {
                 Log.i(TAG, "USB debugging ended")
                 routes[LinkTransport.ADB]?.let(::quietlyClose)
+            }
+            if (routes.containsKey(LinkTransport.WIFI) && (Wifi.address() != wifiAddress || !Wifi.available(this))) {
+                Log.i(TAG, "Wi-Fi changed")
+                routes[LinkTransport.WIFI]?.let(::quietlyClose)
             }
 
             LinkState.publish(
@@ -576,6 +670,8 @@ class LinkService : Service() {
         private const val ACTION_STOP = "dev.wilsoon.windroidfs.action.DISCONNECT"
         private const val ACTION_TETHER = "dev.wilsoon.windroidfs.action.TETHER"
         private const val ACTION_ADB = "dev.wilsoon.windroidfs.action.ADB"
+        private const val ACTION_WIFI = "dev.wilsoon.windroidfs.action.WIFI"
+        private const val HANDSHAKE_TIMEOUT_MS = 10_000
 
         fun connect(context: Context, accessory: UsbAccessory) {
             val intent = Intent(context, LinkService::class.java).putExtra(UsbManager.EXTRA_ACCESSORY, accessory)
@@ -589,6 +685,12 @@ class LinkService : Service() {
         }
 
         /** Call from the visible activity, while [Adb.available]. */
+        /** Call from the visible activity, while [Wifi.available]. */
+        fun listenOnWifi(context: Context) {
+            val intent = Intent(context, LinkService::class.java).setAction(ACTION_WIFI)
+            ContextCompat.startForegroundService(context, intent)
+        }
+
         fun listenOnAdb(context: Context) {
             val intent = Intent(context, LinkService::class.java).setAction(ACTION_ADB)
             ContextCompat.startForegroundService(context, intent)

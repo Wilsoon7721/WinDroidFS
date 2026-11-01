@@ -6,7 +6,7 @@ import java.net.NetworkInterface
 import java.net.SocketException
 
 /** How the PC is linked to this phone. */
-enum class LinkTransport { ACCESSORY, TETHERING, ADB }
+enum class LinkTransport { ACCESSORY, TETHERING, ADB, WIFI }
 
 object Tethering {
     /** Where the app listens on the tethering link. Must match PORT in tether.rs. */
