@@ -329,7 +329,9 @@ class LinkService : Service() {
         if (routes.isEmpty()) stopSelf()
     }
 
+    /** Offering a route that's already offered does nothing. */
     private fun offerAvailableRoutes() {
+        if (!running || pcSeen) return
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         usbManager.accessoryList
             ?.find { it.manufacturer == "Wilson Oon" && it.model == "WinDroidFS" }
@@ -499,6 +501,8 @@ class LinkService : Service() {
                 Log.i(TAG, "Wi-Fi changed")
                 routes[LinkTransport.WIFI]?.let(::quietlyClose)
             }
+            // Routes that turned up since, such as Wi-Fi once a PC is paired
+            mainHandler.post(::offerAvailableRoutes)
 
             LinkState.publish(
                 LinkStatus(
@@ -626,14 +630,18 @@ class LinkService : Service() {
             .build()
     }
 
+    /** Routes get closed from several places, often twice. Nothing about closing one may take the app down. */
     private fun quietlyClose(handle: Closeable) {
         try {
             handle.close()
-        } catch (_: IOException) {
+        } catch (e: Exception) {
+            Log.w(TAG, "Closing a route failed: ${e.message}")
         }
     }
 
-    private fun shutdown(fd: java.io.FileDescriptor) {
+    /** Null once the socket is closed, which a second close finds. */
+    private fun shutdown(fd: java.io.FileDescriptor?) {
+        if (fd == null) return
         try {
             Os.shutdown(fd, OsConstants.SHUT_RDWR)
         } catch (_: ErrnoException) {

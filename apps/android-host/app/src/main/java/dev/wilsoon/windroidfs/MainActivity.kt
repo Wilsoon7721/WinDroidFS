@@ -245,7 +245,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkForExistingAccessory() {
-        if (LinkState.status.value != null) return
+        // Only skip while linked: a service still waiting may have a new route to offer
+        if (LinkState.status.value?.waitingForPc == false) return
 
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val accessoryList = usbManager.accessoryList
