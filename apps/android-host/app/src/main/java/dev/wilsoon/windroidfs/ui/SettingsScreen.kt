@@ -26,9 +26,6 @@ import androidx.compose.ui.unit.sp
 import dev.wilsoon.windroidfs.link.CodePairing
 import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
 
-// Settings screen
-// Current sections: Storage Scope, Security, Service, Network
-
 @Composable
 fun SettingsScreen(
     state: SettingsUiState,
@@ -106,7 +103,6 @@ private fun SettingsTopBar(onBack: () -> Unit) {
     }
 }
 
-// Two radio options. "Selected folders" will reveal the folder checklist */
 @Composable
 private fun StorageScopeCard(
     state: SettingsUiState,
@@ -265,7 +261,7 @@ private fun PortField(currentPort: Int, takenPort: Int?, onPortChange: (Int) -> 
     OutlinedTextField(
         value = text,
         onValueChange = { input ->
-            // Digits only, max 5 characters.
+            // Digits only, max 5 characters
             val cleaned = input.filter { it.isDigit() }.take(5)
             text = cleaned
             if (checkPort(cleaned).usable) onPortChange(cleaned.toInt())

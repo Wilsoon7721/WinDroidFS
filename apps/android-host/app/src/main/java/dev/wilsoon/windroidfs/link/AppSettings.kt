@@ -4,7 +4,6 @@ import android.content.Context
 import dev.wilsoon.windroidfs.ui.SettingsUiState
 import dev.wilsoon.windroidfs.ui.StorageScope
 
-/** The Settings screen's choices, kept across restarts. Read as the link goes, so a change applies at once. */
 object AppSettings {
     private const val FILE = "settings"
 
@@ -38,11 +37,24 @@ object AppSettings {
             .apply()
     }
 
-    /** Top-level folders the PC may see, lowercase, or null for the whole storage. */
+    /** Top-level folders the PC may see or null for the whole storage */
     fun exposedFolders(context: Context): Set<String>? {
         val settings = load(context)
         if (settings.storageScope == StorageScope.ENTIRE_STORAGE) return null
         return settings.exposedFolders.filterValues { it }.keys.map { it.lowercase() }.toSet()
+    }
+
+    fun welcomeSeen(context: Context): Boolean {
+        val prefs = prefs(context)
+        if (prefs.contains("welcome_seen")) return prefs.getBoolean("welcome_seen", false)
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        val updated = info.lastUpdateTime != info.firstInstallTime
+        prefs.edit().putBoolean("welcome_seen", updated).apply()
+        return updated
+    }
+
+    fun markWelcomeSeen(context: Context) {
+        prefs(context).edit().putBoolean("welcome_seen", true).apply()
     }
 
     private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)

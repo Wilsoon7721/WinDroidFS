@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,7 +39,10 @@ fun MainScreen(
     onForgetPc: (String) -> Unit = {},
     onPairingAnswer: (Boolean) -> Unit = {},
     onPairingDismiss: () -> Unit = {},
-    onUnlock: () -> Unit = {}
+    onUnlock: () -> Unit = {},
+    showWelcome: Boolean = false,
+    onOpenWelcome: () -> Unit = {},
+    onDismissWelcome: () -> Unit = {}
 ) {
     var showTerminateDialog by remember { mutableStateOf(false) }
 
@@ -48,6 +52,13 @@ fun MainScreen(
             onOpenSettings = onOpenSettings,
             modifier = Modifier.padding(start = 24.dp, end = 12.dp, top = 24.dp, bottom = 8.dp)
         )
+        if (showWelcome) {
+            WelcomeBanner(
+                onOpen = onOpenWelcome,
+                onDismiss = onDismissWelcome,
+                modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp)
+            )
+        }
 
         // Cross-fades between idle and active. contentKey makes it animate only when switching idle <-> active, not every time a speed number ticks
         AnimatedContent(
@@ -63,7 +74,8 @@ fun MainScreen(
                     onOpenDeveloperOptions = onOpenDeveloperOptions,
                     onOpenTetheringSettings = onOpenTetheringSettings,
                     onPairNewPc = onPairNewPc,
-                    onForgetPc = onForgetPc
+                    onForgetPc = onForgetPc,
+                    onOpenGuide = onOpenWelcome
                 )
             } else {
                 ActiveDashboard(
@@ -133,7 +145,8 @@ private fun IdleContent(
     onOpenDeveloperOptions: () -> Unit,
     onOpenTetheringSettings: () -> Unit,
     onPairNewPc: () -> Unit,
-    onForgetPc: (String) -> Unit
+    onForgetPc: (String) -> Unit,
+    onOpenGuide: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -185,6 +198,20 @@ private fun IdleContent(
                 isExpanded = state.expandedMethod == ConnectionMethod.WIFI,
                 onClick = { onMethodSelected(ConnectionMethod.WIFI) }) {
                 WifiSetupContent(state.localIpAddress, state.tcpPort, state.pairedPcs, onPairNewPc, onForgetPc)
+            }
+        }
+
+        // A link rather than a card, so it doesn't read as a fifth method
+        item {
+            TextButton(onClick = onOpenGuide, modifier = Modifier.fillMaxWidth()) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = WinDroidTheme.colors.brand,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(text = "Getting started", color = WinDroidTheme.colors.brand, fontWeight = FontWeight.SemiBold)
             }
         }
     }

@@ -43,7 +43,7 @@ import dev.wilsoon.windroidfs.ui.*
 import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
 
 enum class AppScreen {
-    ONBOARDING, DASHBOARD, SETTINGS
+    ONBOARDING, DASHBOARD, SETTINGS, WELCOME
 }
 
 private const val ACTION_USB_PERMISSION = "dev.wilsoon.windroidfs.USB_PERMISSION"
@@ -63,7 +63,6 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
-    /** Before Android 9, the screen lock stands in for a fingerprint. */
     private val confirmCredential =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             unlocking = false
@@ -78,7 +77,6 @@ class MainActivity : ComponentActivity() {
 
     private fun handleUsbIntent(intent: Intent) {
         if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
-            // A fresh attach means the PC handshook again, so a past Disconnect no longer applies.
             LinkState.endedByUser = false
             val accessory: UsbAccessory? = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
             accessory?.let { connect(it) }
@@ -163,7 +161,6 @@ class MainActivity : ComponentActivity() {
             val intent = getSystemService(KeyguardManager::class.java)
                 .createConfirmDeviceCredentialIntent("Unlock WinDroidFS", "$host wants to open your files")
             if (intent == null) {
-                // No screen lock at all, so nothing to confirm against
                 unlocking = false
                 LinkService.unlock(this)
             } else {
@@ -206,6 +203,11 @@ class MainActivity : ComponentActivity() {
         }
         val locked = linkStatus?.locked == true
         LaunchedEffect(locked) { if (locked) askToUnlock() }
+        var welcomeSeen by remember { mutableStateOf(AppSettings.welcomeSeen(this)) }
+        val markWelcomeSeen = {
+            welcomeSeen = true
+            AppSettings.markWelcomeSeen(this)
+        }
 
         when (currentScreen) {
             AppScreen.ONBOARDING -> {
@@ -240,9 +242,17 @@ class MainActivity : ComponentActivity() {
                     },
                     onPairingAnswer = CodePairing::answer,
                     onPairingDismiss = CodePairing::dismiss,
-                    onUnlock = { askToUnlock() }
+                    onUnlock = { askToUnlock() },
+                    showWelcome = !welcomeSeen,
+                    onOpenWelcome = {
+                        markWelcomeSeen()
+                        currentScreen = AppScreen.WELCOME
+                    },
+                    onDismissWelcome = { markWelcomeSeen() }
                 )
             }
+
+            AppScreen.WELCOME -> WelcomeScreen(onBack = { currentScreen = AppScreen.DASHBOARD })
 
             AppScreen.SETTINGS -> {
                 SettingsScreen(
@@ -334,7 +344,7 @@ class MainActivity : ComponentActivity() {
 
     private fun checkForExistingAccessory() {
         WifiState.refresh(this)
-        // Only skip while linked: a service still waiting may have a new route to offer
+        // Only skip while linked
         if (LinkState.status.value?.waitingForPc == false) return
 
         val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
@@ -347,7 +357,6 @@ class MainActivity : ComponentActivity() {
         if (accessory == null && !tethered) LinkState.endedByUser = false
         if (LinkState.endedByUser) return
 
-        // Wait on every route there is: the PC picks one
         if (tethered) LinkService.listenOnTethering(this)
         if (Adb.available(this)) LinkService.listenOnAdb(this)
         if (Wifi.available(this)) LinkService.listenOnWifi(this)
