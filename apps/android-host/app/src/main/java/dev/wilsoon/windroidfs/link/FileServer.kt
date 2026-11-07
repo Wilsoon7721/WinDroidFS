@@ -104,8 +104,13 @@ class FileServer(
 
     /** The file at [path], or null if it would point outside shared storage. */
     private fun resolve(path: String): File? {
+        val requested = File(rootPath, path.trimStart('/'))
         val canonical = try {
-            File(rootPath, path.trimStart('/')).canonicalPath
+            val full = requested.canonicalPath
+            // Shared storage gives back the case already on disk, which would make a case-only rename a no-op.
+            // So keep the last name as asked when that's the only difference.
+            val asked = requested.parentFile?.let { File(it.canonicalPath, requested.name).path }
+            if (asked != null && asked != full && asked.equals(full, ignoreCase = true)) asked else full
         } catch (e: IOException) {
             return null
         }
@@ -297,6 +302,7 @@ class FileServer(
         val to = resolve(req.toPath) ?: return outsideStorage()
         if (from.path == rootPath) return opError(ErrorCode.ACCESS_DENIED, "That's the whole storage")
         if (!from.exists()) return opError(ErrorCode.NOT_FOUND, "No such file or folder")
+        if (from.path == to.path) return opOk(from)
 
         // A case-only rename is the same file on shared storage, not a replacement.
         val sameFile = from.path.equals(to.path, ignoreCase = true)
@@ -312,7 +318,9 @@ class FileServer(
             if (to.exists() && !sameFile && !to.delete()) {
                 return opError(ErrorCode.ACCESS_DENIED, "Android refused to replace it")
             }
-            if (!from.renameTo(to)) return opError(ErrorCode.ACCESS_DENIED, "Android refused to rename it")
+            if (!renameOnSharedStorage(from, to, sameFile)) {
+                return opError(ErrorCode.ACCESS_DENIED, "Android refused to rename it")
+            }
             if (to.isFile) {
                 onFileChanged(from)
                 onFileChanged(to)
@@ -427,6 +435,31 @@ class FileServer(
 
                 else -> ErrorCode.IO_ERROR
             }
+        }
+
+        /** [File.renameTo], working around two ways shared storage gets it wrong. */
+        internal fun renameOnSharedStorage(
+            from: File,
+            to: File,
+            sameFile: Boolean,
+            rename: (File, File) -> Boolean = File::renameTo,
+        ): Boolean {
+            // It refuses to rename a folder that holds files, though it renames the files themselves.
+            // So build the folder again under the new name and move its contents across one at a time.
+            fun move(source: File, target: File): Boolean {
+                if (rename(source, target)) return true
+                if (!source.isDirectory || !target.mkdir()) return false
+                val children = source.listFiles() ?: return false
+                return children.all { move(it, File(target, it.name)) } && source.delete()
+            }
+            if (!sameFile) return move(from, to)
+
+            // And it says yes to a case-only rename but keeps the old name, so go through another name.
+            val aside = File(from.parentFile, ".windroidfs-renaming-${System.nanoTime()}")
+            if (!move(from, aside)) return false
+            if (move(aside, to)) return true
+            move(aside, from)
+            return false
         }
     }
 }

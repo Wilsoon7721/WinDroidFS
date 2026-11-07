@@ -1055,6 +1055,8 @@ fn nt_error(e: PhoneError) -> FspError {
         PhoneError::Remote { .. } | PhoneError::Disconnected | PhoneError::ClosedByPhone
     ) {
         log::warn!("⚠️  {e}");
+    } else {
+        log::debug!("Phone refused: {e}");
     }
     FspError::NTSTATUS(status)
 }

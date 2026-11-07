@@ -169,6 +169,50 @@ class FileServerTest {
     }
 
     @Test
+    fun movesAFolderPieceByPieceWhenItCantBeRenamed() {
+        File(root, "src/inner/empty").mkdirs()
+        File(root, "src/a.txt").writeText("a")
+        File(root, "src/inner/b.txt").writeText("b")
+        assertTrue(FileServer.renameOnSharedStorage(File(root, "src"), File(root, "dst"), false, sharedStorage))
+        assertFalse(File(root, "src").exists())
+        assertEquals("a", File(root, "dst/a.txt").readText())
+        assertEquals("b", File(root, "dst/inner/b.txt").readText())
+        assertTrue(File(root, "dst/inner/empty").isDirectory)
+    }
+
+    @Test
+    fun caseOnlyRenamesReallyChangeTheName() {
+        File(root, "dir").mkdir()
+        File(root, "dir/in.txt").writeText("in")
+        File(root, "file.txt").writeText("f")
+        assertTrue(FileServer.renameOnSharedStorage(File(root, "file.txt"), File(root, "FILE.txt"), true, sharedStorage))
+        assertTrue(FileServer.renameOnSharedStorage(File(root, "dir"), File(root, "DIR"), true, sharedStorage))
+        assertEquals(setOf("FILE.txt", "DIR"), root.list()!!.toSet())
+        assertEquals("in", File(root, "DIR/in.txt").readText())
+    }
+
+    @Test
+    fun aCaseOnlyRenameReachesTheDisk() {
+        // Windows' File.getCanonicalPath also gives back the case on disk, just like Android.
+        File(root, "dir").mkdir()
+        File(root, "dir/in.txt").writeText("in")
+        File(root, "note.txt").writeText("n")
+        assertTrue(rename("/dir", "/DIR").success)
+        assertTrue(rename("/note.txt", "/Note.TXT").success)
+        assertEquals(setOf("DIR", "Note.TXT"), root.list()!!.toSet())
+        assertEquals("in", File(root, "DIR/in.txt").readText())
+    }
+
+    // Like the phone's shared storage: folders holding files won't rename, and a case-only rename does nothing.
+    private val sharedStorage = { from: File, to: File ->
+        when {
+            from.isDirectory && from.walk().any { it.isFile } -> false
+            from.name.equals(to.name, ignoreCase = true) && from.parentFile == to.parentFile -> true
+            else -> from.renameTo(to)
+        }
+    }
+
+    @Test
     fun renameClosesTheOpenFileFirst() {
         create("/w.txt")
         write("/w.txt", 0, "data".toByteArray())
