@@ -65,7 +65,7 @@ fun SettingsScreen(
             WinDroidCard {
                 SettingsSwitchRow(
                     title = "Keep screen awake",
-                    subtitle = "Some phones drop USB connections when the screen turns off.",
+                    subtitle = "While a PC is connected and this app is open. Some phones drop USB when the screen turns off, and Wi-Fi responds fastest with it on.",
                     checked = state.keepScreenAwake,
                     onCheckedChange = onKeepScreenAwakeChange
                 )

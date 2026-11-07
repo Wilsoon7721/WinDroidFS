@@ -21,6 +21,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -197,6 +198,12 @@ class MainActivity : ComponentActivity() {
         val wifi by WifiState.info.collectAsState()
         val pairing by CodePairing.state.collectAsState()
 
+        val linked = linkStatus?.waitingForPc == false
+        val keepAwake = settingsState.keepScreenAwake && linked
+        LaunchedEffect(keepAwake) {
+            if (keepAwake) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         val locked = linkStatus?.locked == true
         LaunchedEffect(locked) { if (locked) askToUnlock() }
 
