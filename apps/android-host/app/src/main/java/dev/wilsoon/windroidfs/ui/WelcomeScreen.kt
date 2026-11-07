@@ -32,7 +32,7 @@ import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
 object ProjectLinks {
     const val REPO = "https://github.com/Wilsoon7721/WinDroidFS"
     const val WINDOWS_DOWNLOAD = "$REPO/releases/latest"
-    val WEBSITE: String? = null
+    const val WEBSITE = "https://windroidfs.wilsoon.dev"
 }
 
 // Shown on the home screen until opened or dismissed
@@ -164,7 +164,7 @@ fun WelcomeScreen(onBack: () -> Unit) {
             WinDroidCard {
                 BodyText("Setup help, connection methods, and how your files are kept private.")
                 Spacer(modifier = Modifier.height(8.dp))
-                ProjectLinks.WEBSITE?.let { LinkButton("Website", onClick = { uriHandler.openUri(it) }) }
+                LinkButton("Website", onClick = { uriHandler.openUri(ProjectLinks.WEBSITE) })
                 LinkButton("GitHub", onClick = { uriHandler.openUri(ProjectLinks.REPO) })
             }
         }
