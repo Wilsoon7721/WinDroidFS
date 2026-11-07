@@ -1,7 +1,7 @@
 //! Framing for messages sent over the USB accessory link.
 //!
 //! One frame looks like:
-//! ```
+//! ```text
 //! [magic "WD": 2 bytes][payload length: u32 little-endian][payload][pad: 0 or 1 byte]
 //! ```
 //!
