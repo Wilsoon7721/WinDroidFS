@@ -2,6 +2,7 @@
 name = "windows-daemon"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
 
 # Shared code (driver module, Android IDs, IPC protocol) lives in the library so both the user-level daemon and the privileged service can use it.
 [lib]

@@ -49,3 +49,7 @@ If you have additional ideas, feel free to open an issue or start a pull request
 These are some of the ideas I thought about but haven't actually started researching the feasbility of:
 
 - Allowing rooted devices to access their root filesystem
+
+## License
+
+WinDroidFS is licensed under the [GNU General Public License v3.0](LICENSE).
