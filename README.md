@@ -25,7 +25,8 @@ The Android application allows the phone to control several settings:
 
 - **Storage Scope:** The user can choose the folders they want to share with the PC, or the entire device storage.
 - **Biometric Authentication:** The user can choose to enable or disable biometric authentication.
-- **Foreground Service:** The user can choose to enable or disable the foreground service.
+- **Keep Screen Awake:** The user can keep the screen on while a PC is connected, so the phone doesn't lock mid-transfer.
+- **Wi-Fi Port:** The user can change the port the phone listens on for Local Wi-Fi connections.
 
 ## Verifying the Android App
 
