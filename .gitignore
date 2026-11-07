@@ -146,3 +146,7 @@ apps/windows-daemon/installer/deps/
 
 # Icon source artwork, kept locally only
 /assets/
+
+# Signing keys never belong in the repository
+*.jks
+*.keystore
