@@ -400,9 +400,13 @@ class LinkService : Service() {
                     }
                     if (fileServer == null) {
                         if (!claim(route)) return
-                        fileServer = FileServer(deviceName = deviceName(), onFileChanged = { file ->
-                            MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
-                        })
+                        fileServer = FileServer(
+                            deviceName = deviceName(),
+                            exposedFolders = { AppSettings.exposedFolders(this) },
+                            onFileChanged = { file ->
+                                MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
+                            },
+                        )
                         server = fileServer
                         pcFound()
                     }

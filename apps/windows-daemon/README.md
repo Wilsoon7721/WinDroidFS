@@ -129,7 +129,9 @@ serves them through the adb server's own file-transfer protocol (what `adb pull`
 one long-lived connection, and everything else still comes from the phone app. That protocol only
 moves whole files, so a file is downloaded to a temporary copy on first read (fetched again if
 the phone's copy changes), written there, and sent back when Windows flushes or closes it. Large
-`.obb` files therefore download in full before the first byte reaches Explorer.
+`.obb` files therefore download in full before the first byte reaches Explorer. It's off whenever
+the phone shares only some folders (its `Pong` says `limited_folders`), since it goes around the
+phone app's own checks.
 
 Writes go to the phone as they happen, at most 1 MiB per request. The phone keeps the file
 being written open between requests, and when Windows closes it the PC sends a flush: the

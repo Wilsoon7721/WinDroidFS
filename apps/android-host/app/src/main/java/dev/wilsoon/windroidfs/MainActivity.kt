@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import dev.wilsoon.windroidfs.link.Adb
+import dev.wilsoon.windroidfs.link.AppSettings
 import dev.wilsoon.windroidfs.link.CodePairing
 import dev.wilsoon.windroidfs.link.WifiState
 import dev.wilsoon.windroidfs.link.LinkService
@@ -133,7 +134,11 @@ class MainActivity : ComponentActivity() {
         }
 
         var dashboardState by remember { mutableStateOf(DashboardUiState()) }
-        var settingsState by remember { mutableStateOf(SettingsUiState()) }
+        var settingsState by remember { mutableStateOf(AppSettings.load(this)) }
+        val changeSettings = { changed: SettingsUiState ->
+            settingsState = changed
+            AppSettings.save(this, changed)
+        }
         val linkStatus by LinkState.status.collectAsState()
         val wifi by WifiState.info.collectAsState()
         val pairing by CodePairing.state.collectAsState()
@@ -177,15 +182,15 @@ class MainActivity : ComponentActivity() {
                 SettingsScreen(
                     state = settingsState,
                     onBack = { currentScreen = AppScreen.DASHBOARD },
-                    onStorageScopeChange = { settingsState = settingsState.copy(storageScope = it) },
+                    onStorageScopeChange = { changeSettings(settingsState.copy(storageScope = it)) },
                     onFolderToggle = { folder, isExposed ->
                         val updatedFolders = settingsState.exposedFolders.toMutableMap()
                         updatedFolders[folder] = isExposed
-                        settingsState = settingsState.copy(exposedFolders = updatedFolders)
+                        changeSettings(settingsState.copy(exposedFolders = updatedFolders))
                     },
-                    onRequireBiometricsChange = { settingsState = settingsState.copy(requireBiometrics = it) },
-                    onKeepScreenAwakeChange = { settingsState = settingsState.copy(keepScreenAwake = it) },
-                    onPortChange = { settingsState = settingsState.copy(tcpPort = it) }
+                    onRequireBiometricsChange = { changeSettings(settingsState.copy(requireBiometrics = it)) },
+                    onKeepScreenAwakeChange = { changeSettings(settingsState.copy(keepScreenAwake = it)) },
+                    onPortChange = { changeSettings(settingsState.copy(tcpPort = it)) },
                 )
             }
         }

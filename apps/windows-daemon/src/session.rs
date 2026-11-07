@@ -15,6 +15,7 @@ use crate::driver;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
+use crate::windroid::Pong;
 use crate::{adb, tether, webdav, wifi, winfsp_fs};
 
 pub use crate::windroid::UsbSpeed;
@@ -236,6 +237,8 @@ pub struct Connected {
     pub phone: PhoneClient,
     pub device_name: String,
     pub route: Route,
+    /// The phone shares only some folders, so nothing may go around it.
+    pub limited_folders: bool,
     /// Held as long as the link: dropping it removes the adb forward.
     pub forward: Option<adb::Forward>,
 }
@@ -269,9 +272,14 @@ fn connect_and_serve(
             phone,
             device_name,
             forward,
+            limited_folders,
             ..
         }) => {
-            let adb = forward.as_ref().map(|f| f.phone().clone());
+            // adb's Android/data access goes around the phone app, so not when the phone limits what's shared
+            let adb = forward
+                .as_ref()
+                .filter(|_| !limited_folders)
+                .map(|f| f.phone().clone());
             let ended = serve(phone, &device_name, adb, options, stop, on_event);
             drop(forward);
             ended
@@ -414,8 +422,9 @@ fn answering(
     route: Route,
 ) -> Result<Connected, Ended> {
     match wait_for_app(&phone, stop, on_event) {
-        Some(device_name) => {
+        Some(pong) => {
             log::info!("🏓 Phone responded to Ping! The link is active.");
+            let device_name = pong.device_name;
             if route != Route::Wifi {
                 pair_for_wifi(&phone, &device_name);
             }
@@ -423,6 +432,7 @@ fn answering(
                 phone,
                 device_name,
                 route,
+                limited_folders: pong.limited_folders,
                 forward: None,
             })
         }
@@ -531,13 +541,13 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
 }
 
 /// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
-fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<String> {
+fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<Pong> {
     let mut asked = false;
     // Right after the handshake the app is often still opening, so the first ping failing is normal.
     let patience = Instant::now() + Duration::from_secs(4);
     loop {
-        match phone.ping() {
-            Ok(name) => return Some(name),
+        match phone.pong() {
+            Ok(pong) => return Some(pong),
             Err(_) if !phone.is_connected() => return None,
             Err(e) => {
                 log::debug!("No answer from the app yet: {e}");

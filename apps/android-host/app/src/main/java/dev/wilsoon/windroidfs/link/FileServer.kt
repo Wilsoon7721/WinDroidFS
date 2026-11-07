@@ -37,6 +37,8 @@ data class WriteProgress(val fileName: String, val bytesDone: Long, val bytesTot
 class FileServer(
     root: File = Environment.getExternalStorageDirectory(),
     private val deviceName: String = "",
+    /** Top-level folders the PC may see, lowercase, or null for all. Asked on every request, so a change applies at once. */
+    private val exposedFolders: () -> Set<String>? = { null },
     private val onFileChanged: (File) -> Unit = {},
 ) {
     private val rootPath: String = root.canonicalPath
@@ -57,11 +59,20 @@ class FileServer(
     /** Build the reply to [request]. Always echoes its `request_id`. */
     fun handle(request: Packet): Packet {
         val reply = Packet.newBuilder().setRequestId(request.requestId)
+        val refused = when {
+            request.hasPing() || request.hasVolumeRequest() || request.hasGoodbye() -> null
+            // Not "access denied": a folder that isn't shared shouldn't seem to be there at all
+            pathsOf(request).any(::isHidden) -> ErrorCode.NOT_FOUND to "No such file or folder"
+            else -> null
+        }
+        if (refused != null) return refuse(reply, request, refused.first, refused.second)
+
         when {
             request.hasPing() ->
                 reply.setPong(
                     Pong.newBuilder().setTimestampMs(request.ping.timestampMs)
-                        .setDeviceName(deviceName),
+                        .setDeviceName(deviceName)
+                        .setLimitedFolders(exposedFolders() != null),
                 )
 
             request.hasDirRequest() -> reply.setDirResponse(listDirectory(request.dirRequest.path))
@@ -102,6 +113,40 @@ class FileServer(
         }
     }
 
+    /** Outside every exposed folder. The root itself always shows, listing only the exposed folders. */
+    private fun hidden(file: File): Boolean {
+        val exposed = exposedFolders() ?: return false
+        if (file.path == rootPath) return false
+        val top = file.path.removePrefix(rootPath + File.separator).substringBefore(File.separator)
+        return top.lowercase() !in exposed
+    }
+
+    private fun isHidden(path: String) = resolve(path)?.let(::hidden) ?: false
+
+    private fun pathsOf(request: Packet): List<String> = when {
+        request.hasDirRequest() -> listOf(request.dirRequest.path)
+        request.hasStatRequest() -> listOf(request.statRequest.path)
+        request.hasFileReq() -> listOf(request.fileReq.path)
+        request.hasCreateRequest() -> listOf(request.createRequest.path)
+        request.hasWriteRequest() -> listOf(request.writeRequest.path)
+        request.hasTruncateRequest() -> listOf(request.truncateRequest.path)
+        request.hasDeleteRequest() -> listOf(request.deleteRequest.path)
+        request.hasRenameRequest() -> listOf(request.renameRequest.fromPath, request.renameRequest.toPath)
+        request.hasSetTimesRequest() -> listOf(request.setTimesRequest.path)
+        request.hasFlushRequest() -> listOf(request.flushRequest.path)
+        else -> emptyList()
+    }
+
+    private fun refuse(reply: Packet.Builder, request: Packet, code: ErrorCode, message: String): Packet {
+        when {
+            request.hasDirRequest() -> reply.setDirResponse(dirError(code, message))
+            request.hasStatRequest() -> reply.setStatResponse(statError(code, message))
+            request.hasFileReq() -> reply.setFileRes(readError(code, message))
+            else -> reply.setOpResponse(opError(code, message))
+        }
+        return reply.build()
+    }
+
     /** Android 11+ hides `Android/data` and `Android/obb` even with All Files Access. */
     private fun isRestricted(dir: File): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
@@ -129,7 +174,7 @@ class FileServer(
 
         return DirectoryResponse.newBuilder()
             .setSuccess(true)
-            .addAllFiles(children.map(::fileInfo))
+            .addAllFiles(children.filterNot(::hidden).map(::fileInfo))
             .build()
     }
 

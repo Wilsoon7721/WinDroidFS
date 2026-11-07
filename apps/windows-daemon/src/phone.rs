@@ -13,7 +13,7 @@ use rusb::{Context, DeviceHandle};
 use crate::windroid::packet::Payload;
 use crate::windroid::{
     CreateRequest, DeleteRequest, DirectoryRequest, ErrorCode, FileInfo, FileReadRequest,
-    FlushRequest, Goodbye, OperationResponse, Packet, PairRequest, PairResponse, Ping,
+    FlushRequest, Goodbye, OperationResponse, Packet, PairRequest, PairResponse, Ping, Pong,
     RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UsbSpeed, VolumeInfoRequest,
     WriteRequest,
 };
@@ -192,8 +192,13 @@ impl PhoneClient {
     /// Check the phone is answering. Returns its name ("Wilson's S25+"), which is empty if the phone app predates sending it.
     /// Gives up after a few seconds: a phone app that's listening answers a ping near instantly.
     pub fn ping(&self) -> Result<String, PhoneError> {
+        self.pong().map(|pong| pong.device_name)
+    }
+
+    /// The whole answer to a ping: also whether the phone is locked, and whether it shares only some folders.
+    pub fn pong(&self) -> Result<Pong, PhoneError> {
         match self.call_within(Payload::Ping(ping(self.speed)), HEARTBEAT_TIMEOUT)? {
-            Payload::Pong(pong) => Ok(pong.device_name),
+            Payload::Pong(pong) => Ok(pong),
             _ => Err(PhoneError::UnexpectedReply),
         }
     }
@@ -689,6 +694,7 @@ mod local {
             Payload::Ping(p) => Payload::Pong(Pong {
                 timestamp_ms: p.timestamp_ms,
                 device_name: "Test Phone".into(),
+                ..Default::default()
             }),
             Payload::DirRequest(r) => Payload::DirResponse(list(root, &resolve(root, &r.path))),
             Payload::StatRequest(r) => Payload::StatResponse(stat(root, &resolve(root, &r.path))),
