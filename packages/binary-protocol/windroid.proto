@@ -129,6 +129,8 @@ enum UsbSpeed {
 message Pong {
   int64 timestamp_ms = 1;
   string device_name = 2;  // e.g. "Wilson's S25+"
+  // Waiting for the owner's fingerprint: file requests are refused until then.
+  bool locked = 3;
   // Only some top-level folders are shared, so the PC mustn't reach around the app (adb's Android/data).
   bool limited_folders = 4;
 }

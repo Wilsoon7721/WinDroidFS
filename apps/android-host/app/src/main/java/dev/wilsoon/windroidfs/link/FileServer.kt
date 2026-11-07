@@ -39,6 +39,8 @@ class FileServer(
     private val deviceName: String = "",
     /** Top-level folders the PC may see, lowercase, or null for all. Asked on every request, so a change applies at once. */
     private val exposedFolders: () -> Set<String>? = { null },
+    /** True until the owner confirms with a fingerprint. Only pings, volume and goodbye are answered meanwhile. */
+    private val locked: () -> Boolean = { false },
     private val onFileChanged: (File) -> Unit = {},
 ) {
     private val rootPath: String = root.canonicalPath
@@ -61,6 +63,7 @@ class FileServer(
         val reply = Packet.newBuilder().setRequestId(request.requestId)
         val refused = when {
             request.hasPing() || request.hasVolumeRequest() || request.hasGoodbye() -> null
+            locked() -> ErrorCode.ACCESS_DENIED to "Unlock WinDroidFS on the phone first"
             // Not "access denied": a folder that isn't shared shouldn't seem to be there at all
             pathsOf(request).any(::isHidden) -> ErrorCode.NOT_FOUND to "No such file or folder"
             else -> null
@@ -72,6 +75,7 @@ class FileServer(
                 reply.setPong(
                     Pong.newBuilder().setTimestampMs(request.ping.timestampMs)
                         .setDeviceName(deviceName)
+                        .setLocked(locked())
                         .setLimitedFolders(exposedFolders() != null),
                 )
 

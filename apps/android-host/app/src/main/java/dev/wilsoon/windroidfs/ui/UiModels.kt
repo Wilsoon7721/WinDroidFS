@@ -38,7 +38,9 @@ data class ActiveSession(
     val totalBytesTransferred: Long,
     // null = nothing being written right now (safe to terminate without a warning).
     val activeTransfer: TransferInProgress? = null,
-    val usbLink: UsbLink = UsbLink.UNKNOWN
+    val usbLink: UsbLink = UsbLink.UNKNOWN,
+    // Waiting for a fingerprint before the PC sees anything
+    val locked: Boolean = false
 )
 
 // [maxSpeed] is set for links slower than USB 3. Same words as speed_advice in session.rs.

@@ -36,7 +36,8 @@ fun MainScreen(
     onPairNewPc: () -> Unit = {},
     onForgetPc: (String) -> Unit = {},
     onPairingAnswer: (Boolean) -> Unit = {},
-    onPairingDismiss: () -> Unit = {}
+    onPairingDismiss: () -> Unit = {},
+    onUnlock: () -> Unit = {}
 ) {
     var showTerminateDialog by remember { mutableStateOf(false) }
 
@@ -66,6 +67,7 @@ fun MainScreen(
             } else {
                 ActiveDashboard(
                     session = session,
+                    onUnlock = onUnlock,
                     onTerminateClick = {
                         // Only interrupt if something may get corrupted
                         if (session.activeTransfer != null) showTerminateDialog = true
@@ -287,6 +289,25 @@ private fun WifiSetupContent(
 
 // Used inside setup cards to jump into Android settings
 @Composable
+private fun LockedCard(hostName: String, onUnlock: () -> Unit) {
+    WinDroidCard {
+        Text(
+            text = "Locked",
+            color = WinDroidTheme.colors.warning,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "$hostName sees nothing until you confirm it's you.",
+            color = WinDroidTheme.colors.textSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        SetupActionButton(text = "Unlock", onClick = onUnlock)
+    }
+}
+
+@Composable
 private fun SetupActionButton(text: String, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
@@ -299,13 +320,14 @@ private fun SetupActionButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActiveDashboard(session: ActiveSession, onTerminateClick: () -> Unit) {
+private fun ActiveDashboard(session: ActiveSession, onUnlock: () -> Unit, onTerminateClick: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
             .padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         ProtocolBanner(session)
+        if (session.locked) LockedCard(session.hostName, onUnlock)
         if (session.usbLink != UsbLink.UNKNOWN) UsbTypeCard(session.usbLink)
 
         SectionLabel("Live Throughput", modifier = Modifier.padding(top = 8.dp))

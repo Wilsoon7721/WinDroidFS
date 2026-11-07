@@ -72,6 +72,8 @@ enum Status {
     Connecting,
     /// Linked over USB, but the phone app isn't answering yet.
     WaitingForApp,
+    /// The phone app answered but waits for its owner's fingerprint.
+    WaitingForUnlock,
     Mounted {
         drive: char,
         device_name: String,
@@ -90,6 +92,9 @@ impl Status {
             Status::WaitingForPhone => "Waiting for a phone".into(),
             Status::Connecting => "Connecting to the phone...".into(),
             Status::WaitingForApp => "Open WinDroidFS on your phone to finish connecting".into(),
+            Status::WaitingForUnlock => {
+                "Unlock WinDroidFS on your phone to finish connecting".into()
+            }
             Status::Mounted {
                 drive,
                 device_name,
@@ -300,6 +305,7 @@ fn supervise(shared: &Shared) {
                 "Android doesn't let apps, WinDroidFS included, open Android\\data or Android\\obb. adb is allowed in: turn on USB debugging and choose Connect over > ADB only to reach them.",
             ),
             Event::WaitingForApp => shared.set_status(Status::WaitingForApp),
+            Event::WaitingForUnlock => shared.set_status(Status::WaitingForUnlock),
             Event::Mounted {
                 drive,
                 device_name,
@@ -582,7 +588,10 @@ impl Tray {
                 // Also drops a link still waiting on the old route
                 if matches!(
                     shared.status(),
-                    Status::Connecting | Status::WaitingForApp | Status::Mounted { .. }
+                    Status::Connecting
+                        | Status::WaitingForApp
+                        | Status::WaitingForUnlock
+                        | Status::Mounted { .. }
                 ) {
                     shared.stop_session(true);
                 }

@@ -59,6 +59,8 @@ data class LinkStatus(
     val transport: LinkTransport,
     val waitingForPc: Boolean,
     val uptimeSeconds: Long,
+    /** Waiting for the owner's fingerprint (Settings > Require biometrics). */
+    val locked: Boolean = false,
     /* From PC view */
     val readBytesPerSecond: Long,
     val writeBytesPerSecond: Long,
@@ -90,6 +92,7 @@ class LinkService : Service() {
     @Volatile private var tetherAddress: InetAddress? = null
     @Volatile private var wifiAddress: InetAddress? = null
     @Volatile private var wifiAdvert: Advert? = null
+    @Volatile private var locked = false
     private var detachRegistered = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
@@ -116,6 +119,11 @@ class LinkService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_UNLOCK) {
+            locked = false
+            if (!running) stopSelf()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             LinkState.endedByUser = true
             if (running && pcSeen) {
@@ -329,6 +337,7 @@ class LinkService : Service() {
         releaseWifi()
         pcSeen = false
         sayingGoodbye = false
+        locked = false
         claimed.set(false)
         hostName = ""
         usbSpeed = UsbSpeed.USB_SPEED_UNKNOWN
@@ -403,6 +412,7 @@ class LinkService : Service() {
                         fileServer = FileServer(
                             deviceName = deviceName(),
                             exposedFolders = { AppSettings.exposedFolders(this) },
+                            locked = { locked },
                             onFileChanged = { file ->
                                 MediaScannerConnection.scanFile(applicationContext, arrayOf(file.path), null, null)
                             },
@@ -494,12 +504,14 @@ class LinkService : Service() {
         lastActivityMs = connectedAtMs
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WinDroidFS:link").apply { acquire() }
         if (transport == LinkTransport.WIFI) holdWifiAwake()
+        locked = AppSettings.load(this).requireBiometrics
         pcSeen = true
         Log.d(TAG, "The PC answered")
     }
 
     private var lastRead = 0L
     private var lastWritten = 0L
+    private var lastNotifiedLocked = false
     private var lastNotifiedHost: String? = null // null while waiting for the PC
 
     /** Once a second: work out speeds, publish the status, and watch for a silent PC */
@@ -552,6 +564,7 @@ class LinkService : Service() {
                 transport = transport,
                 waitingForPc = false,
                 uptimeSeconds = (System.currentTimeMillis() - connectedAtMs) / 1000,
+                locked = locked,
                 readBytesPerSecond = read - lastRead,
                 writeBytesPerSecond = written - lastWritten,
                 totalBytes = read + written,
@@ -563,10 +576,11 @@ class LinkService : Service() {
         lastWritten = written
 
         val host = hostName
-        if (host != lastNotifiedHost) {
+        if (host != lastNotifiedHost || locked != lastNotifiedLocked) {
             lastNotifiedHost = host
+            lastNotifiedLocked = locked
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, notification(host))
+                .notify(NOTIFICATION_ID, notification(host, locked))
         }
     }
 
@@ -607,7 +621,7 @@ class LinkService : Service() {
     }
 
     /** Host is null while waiting for the PC */
-    private fun notification(host: String?): Notification {
+    private fun notification(host: String?, locked: Boolean = false): Notification {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -631,13 +645,17 @@ class LinkService : Service() {
             .setContentTitle(
                 when {
                     host == null -> "Waiting for your PC"
+                    locked -> "${host.ifEmpty { "Your PC" }} wants your files"
                     host.isEmpty() -> "Connected to your PC"
                     else -> "Connected to $host"
                 },
             )
             .setContentText(
-                if (host == null) "Start WinDroidFS on the PC to mount your storage"
-                else "Your phone's storage is mounted on the PC",
+                when {
+                    host == null -> "Start WinDroidFS on the PC to mount your storage"
+                    locked -> "Tap to unlock with your fingerprint"
+                    else -> "Your phone's storage is mounted on the PC"
+                },
             )
             .setContentIntent(openApp)
             .addAction(
@@ -687,6 +705,7 @@ class LinkService : Service() {
         private const val GOODBYE_GRACE_MS = 5_000L
         private const val ACTION_STOP = "dev.wilsoon.windroidfs.action.DISCONNECT"
         private const val ACTION_TETHER = "dev.wilsoon.windroidfs.action.TETHER"
+        private const val ACTION_UNLOCK = "dev.wilsoon.windroidfs.action.UNLOCK"
         private const val ACTION_ADB = "dev.wilsoon.windroidfs.action.ADB"
         private const val ACTION_WIFI = "dev.wilsoon.windroidfs.action.WIFI"
         private const val HANDSHAKE_TIMEOUT_MS = 10_000
@@ -712,6 +731,11 @@ class LinkService : Service() {
         fun listenOnAdb(context: Context) {
             val intent = Intent(context, LinkService::class.java).setAction(ACTION_ADB)
             ContextCompat.startForegroundService(context, intent)
+        }
+
+        /** After the owner confirmed with a fingerprint. */
+        fun unlock(context: Context) {
+            context.startService(Intent(context, LinkService::class.java).setAction(ACTION_UNLOCK))
         }
 
         fun disconnect(context: Context) {

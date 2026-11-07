@@ -4,6 +4,7 @@ import dev.wilsoon.windroidfs.protocol.WinDroidProto.CreateRequest
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.DirectoryRequest
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.ErrorCode
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Packet
+import dev.wilsoon.windroidfs.protocol.WinDroidProto.Ping
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.RenameRequest
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.StatRequest
 import java.io.File
@@ -15,10 +16,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/** Settings > Storage scope, as the PC meets it. */
+/** Settings > Storage scope and Require biometrics, as the PC meets them. */
 class FileServerScopeTest {
     private lateinit var root: File
     private var exposed: Set<String>? = setOf("dcim", "download")
+    private var locked = false
     private lateinit var server: FileServer
 
     @Before
@@ -28,7 +30,7 @@ class FileServerScopeTest {
         File(root, "Documents").mkdirs()
         File(root, "Documents/secret.txt").writeText("no")
         File(root, "root-file.txt").writeText("no")
-        server = FileServer(root, exposedFolders = { exposed })
+        server = FileServer(root, exposedFolders = { exposed }, locked = { locked })
     }
 
     @After
@@ -72,5 +74,18 @@ class FileServerScopeTest {
     fun theWholeStorageShowsEverything() {
         exposed = null
         assertEquals(setOf("DCIM", "Documents", "root-file.txt"), list("/").filesList.map { it.name }.toSet())
+    }
+
+    @Test
+    fun lockedRefusesFilesButAnswersPings() {
+        locked = true
+        assertEquals(ErrorCode.ACCESS_DENIED, list("/DCIM").errorCode)
+        val pong = send { setPing(Ping.getDefaultInstance()) }.pong
+        assertTrue(pong.locked)
+        assertTrue(pong.limitedFolders)
+
+        locked = false
+        assertTrue(list("/DCIM").success)
+        assertFalse(send { setPing(Ping.getDefaultInstance()) }.pong.locked)
     }
 }

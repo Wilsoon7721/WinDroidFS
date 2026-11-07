@@ -95,6 +95,8 @@ pub enum Event {
     WaitingForApp,
     /// Explorer opened Android\data or Android\obb, which Android keeps every app out of. Once per mount.
     RestrictedFolder,
+    /// The phone app is answering but waits for its owner's fingerprint before sharing anything.
+    WaitingForUnlock,
     /// Mounted and serving.
     Mounted {
         drive: char,
@@ -543,10 +545,18 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
 /// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
 fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<Pong> {
     let mut asked = false;
+    let mut locked = false;
     // Right after the handshake the app is often still opening, so the first ping failing is normal.
     let patience = Instant::now() + Duration::from_secs(4);
     loop {
         match phone.pong() {
+            Ok(pong) if pong.locked => {
+                if !locked {
+                    locked = true;
+                    log::info!("🔒 Unlock WinDroidFS on the phone to finish connecting.");
+                    on_event(Event::WaitingForUnlock);
+                }
+            }
             Ok(pong) => return Some(pong),
             Err(_) if !phone.is_connected() => return None,
             Err(e) => {

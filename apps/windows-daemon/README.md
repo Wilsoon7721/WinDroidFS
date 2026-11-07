@@ -133,6 +133,9 @@ the phone's copy changes), written there, and sent back when Windows flushes or 
 the phone shares only some folders (its `Pong` says `limited_folders`), since it goes around the
 phone app's own checks.
 
+If the phone requires a fingerprint (its Settings > Require biometrics), its `Pong` says `locked`
+and the PC waits, "Unlock on your phone", before mounting anything.
+
 Writes go to the phone as they happen, at most 1 MiB per request. The phone keeps the file
 being written open between requests, and when Windows closes it the PC sends a flush: the
 phone syncs the file to storage and tells the media library, so new photos show up in the

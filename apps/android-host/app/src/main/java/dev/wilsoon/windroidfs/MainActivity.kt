@@ -1,17 +1,21 @@
 package dev.wilsoon.windroidfs
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
@@ -57,6 +61,14 @@ class MainActivity : ComponentActivity() {
     private var permissionRequested = false
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    /** Before Android 9, the screen lock stands in for a fingerprint. */
+    private val confirmCredential =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            unlocking = false
+            if (it.resultCode == RESULT_OK) LinkService.unlock(this)
+        }
+    private var unlocking = false
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -115,6 +127,48 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         handler.post(accessoryCheck)
+        if (LinkState.status.value?.locked == true) askToUnlock()
+    }
+
+    /** Settings > Require biometrics: the PC sees nothing until this succeeds. */
+    private fun askToUnlock() {
+        if (unlocking) return
+        val host = LinkState.status.value?.hostName?.ifEmpty { null } ?: "Your PC"
+        unlocking = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val builder = BiometricPrompt.Builder(this)
+                .setTitle("Unlock WinDroidFS")
+                .setSubtitle("$host wants to open your files")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                builder.setAllowedAuthenticators(
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+                )
+            } else {
+                builder.setNegativeButton("Not now", mainExecutor) { _, _ -> unlocking = false }
+            }
+            builder.build().authenticate(CancellationSignal(), mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    unlocking = false
+                    LinkService.unlock(this@MainActivity)
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    unlocking = false
+                    Log.i("WinDroid", "Unlock didn't happen: $errString")
+                }
+            })
+        } else {
+            @Suppress("DEPRECATION")
+            val intent = getSystemService(KeyguardManager::class.java)
+                .createConfirmDeviceCredentialIntent("Unlock WinDroidFS", "$host wants to open your files")
+            if (intent == null) {
+                // No screen lock at all, so nothing to confirm against
+                unlocking = false
+                LinkService.unlock(this)
+            } else {
+                confirmCredential.launch(intent)
+            }
+        }
     }
 
     override fun onPause() {
@@ -142,6 +196,9 @@ class MainActivity : ComponentActivity() {
         val linkStatus by LinkState.status.collectAsState()
         val wifi by WifiState.info.collectAsState()
         val pairing by CodePairing.state.collectAsState()
+
+        val locked = linkStatus?.locked == true
+        LaunchedEffect(locked) { if (locked) askToUnlock() }
 
         when (currentScreen) {
             AppScreen.ONBOARDING -> {
@@ -174,7 +231,8 @@ class MainActivity : ComponentActivity() {
                         WifiState.refresh(this)
                     },
                     onPairingAnswer = CodePairing::answer,
-                    onPairingDismiss = CodePairing::dismiss
+                    onPairingDismiss = CodePairing::dismiss,
+                    onUnlock = { askToUnlock() }
                 )
             }
 
@@ -204,6 +262,7 @@ class MainActivity : ComponentActivity() {
             LinkTransport.WIFI -> ConnectionMethod.WIFI
         },
         hostName = hostName.ifEmpty { "your PC" },
+        locked = locked,
         uptimeSeconds = uptimeSeconds,
         readBytesPerSecond = readBytesPerSecond,
         writeBytesPerSecond = writeBytesPerSecond,
