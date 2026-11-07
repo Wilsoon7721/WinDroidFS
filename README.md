@@ -1,7 +1,5 @@
 # WinDroidFS
 
-> This application is still a work in progress. Do check back for updates if you're interested in the development of this application! See [WIP.md](WIP.md) for more information.
-
 WinDroidFS bypasses the traditionally unstable Windows Media Transfer Protocol (MTP) by using the Android Open Accessory (AOA) protocol. It establishes a high-speed, raw binary pipe between your PC and your phone, treating your Android device like a standard local flash drive.
 
 ## Architecture
