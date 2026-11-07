@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
+  <title>WinDroidFS</title>
+  <desc>Amber folder with a double-headed transfer arrow on a dark tile.</desc>
+  <rect width="96" height="96" rx="20" fill="#171125"/>
+  <path fill="#EF9F27" fill-rule="evenodd" d="M18,21 H40 A5,5 0 0 1 45,26 V30 H75 A8,8 0 0 1 83,38 V70 A8,8 0 0 1 75,78 H21 A8,8 0 0 1 13,70 V26 A5,5 0 0 1 18,21 Z M22,54 L40,40 V48 H56 V40 L74,54 L56,68 V60 H40 V68 Z"/>
+</svg>

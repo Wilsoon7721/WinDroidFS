@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WinDroidFS: use your Android phone as a drive in Windows File Explorer</title>
+    <meta name="description" content="WinDroidFS shows your Android phone's storage as a drive letter in Windows File Explorer, over USB or Wi-Fi. Free and open source." />
+    <link rel="canonical" href="https://windroidfs.wilsoon.dev/" />
+    <meta name="theme-color" content="#171125" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon-256.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://windroidfs.wilsoon.dev/" />
+    <meta property="og:title" content="WinDroidFS" />
+    <meta property="og:description" content="Your Android phone as a drive letter in Windows File Explorer, over USB or Wi-Fi." />
+    <meta property="og:image" content="https://windroidfs.wilsoon.dev/icon-256.png" />
+    <meta name="twitter:card" content="summary" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Person",
+            "@id": "https://wilsoon.dev/#person",
+            "name": "Wilson Oon",
+            "alternateName": ["Wilsoon7721", "Wilsoon", "Calorious"],
+            "url": "https://wilsoon.dev",
+            "image": "https://wilsoon.dev/logo.png",
+            "jobTitle": "Full-Stack Developer",
+            "description": "Full-Stack Developer based in Singapore specializing in Node.js, React, and Python.",
+            "address": { "@type": "PostalAddress", "addressCountry": "SG" },
+            "knowsAbout": ["TypeScript", "Node.js", "React", "Next.js", "Python", "PostgreSQL", "Redis", "Cloudflare Workers", "OpenID Connect", "OAuth 2.0", "WebAuthn", "WebRTC", "Web Application Security"],
+            "knowsLanguage": ["en", "zh"],
+            "alumniOf": [
+              {
+                "@type": "EducationalOrganization",
+                "name": "Institute of Technical Education",
+                "url": "https://www.ite.edu.sg",
+                "sameAs": "https://en.wikipedia.org/wiki/Institute_of_Technical_Education"
+              }
+            ],
+            "affiliation": [
+              {
+                "@type": "CollegeOrUniversity",
+                "name": "Nanyang Polytechnic",
+                "url": "https://www.nyp.edu.sg",
+                "sameAs": "https://en.wikipedia.org/wiki/Nanyang_Polytechnic"
+              }
+            ],
+            "hasCredential": [
+              {
+                "@type": "EducationalOccupationalCredential",
+                "name": "AWS Certified Cloud Practitioner",
+                "credentialCategory": "certification",
+                "recognizedBy": { "@type": "Organization", "name": "Amazon Web Services", "url": "https://aws.amazon.com" }
+              }
+            ],
+            "worksFor": { "@id": "https://wilsoon.dev/#organization" },
+            "sameAs": ["https://www.linkedin.com/in/wilsonoon7172", "https://github.com/Wilsoon7721", "https://www.npmjs.com/~calorious"]
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://wilsoon.dev/#organization",
+            "name": "Wilson's Web Development Services",
+            "url": "https://work.wilsoon.dev",
+            "founder": { "@id": "https://wilsoon.dev/#person" }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://windroidfs.wilsoon.dev/#website",
+            "url": "https://windroidfs.wilsoon.dev/",
+            "name": "WinDroidFS",
+            "description": "Use your Android phone as a drive in Windows File Explorer, over USB or Wi-Fi.",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://wilsoon.dev/#person" },
+            "author": { "@id": "https://wilsoon.dev/#person" }
+          },
+          {
+            "@type": "WebPage",
+            "@id": "https://windroidfs.wilsoon.dev/",
+            "url": "https://windroidfs.wilsoon.dev/",
+            "name": "WinDroidFS: use your Android phone as a drive in Windows File Explorer",
+            "description": "WinDroidFS shows your Android phone's storage as a drive letter in Windows File Explorer, over USB or Wi-Fi. Free and open source.",
+            "primaryImageOfPage": "https://windroidfs.wilsoon.dev/icon-256.png",
+            "isPartOf": { "@id": "https://windroidfs.wilsoon.dev/#website" },
+            "author": { "@id": "https://wilsoon.dev/#person" },
+            "inLanguage": "en",
+            "mainEntity": { "@id": "https://windroidfs.wilsoon.dev/#app" }
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://windroidfs.wilsoon.dev/#app",
+            "name": "WinDroidFS",
+            "description": "Shows an Android phone's storage as a drive letter in Windows File Explorer, over USB or Wi-Fi.",
+            "applicationCategory": "UtilitiesApplication",
+            "operatingSystem": "Windows 10, Windows 11, Android 7.0+",
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "url": "https://windroidfs.wilsoon.dev/",
+            "image": "https://windroidfs.wilsoon.dev/icon-256.png",
+            "downloadUrl": "https://github.com/Wilsoon7721/WinDroidFS/releases/latest",
+            "codeRepository": "https://github.com/Wilsoon7721/WinDroidFS",
+            "author": { "@id": "https://wilsoon.dev/#person" },
+            "publisher": { "@id": "https://wilsoon.dev/#person" }
+          }
+        ]
+      }
+    </script>
+
+    <script>
+      document.documentElement.classList.add("js");
+      try {
+        const saved = localStorage.getItem("theme");
+        if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+
+  <body>
+    <header class="wrap top">
+      <a class="brand" href="#">
+        <img src="favicon.svg" alt="" width="28" height="28" />
+        <span>WinDroidFS</span>
+      </a>
+      <nav class="top-links" aria-label="Elsewhere">
+        <a href="https://wilsoon.dev" title="More of my work">by <b>Wilsoon</b></a>
+        <a class="icon-link" href="https://github.com/Wilsoon7721/WinDroidFS" aria-label="WinDroidFS on GitHub" title="GitHub">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </a>
+        <button class="icon-link theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch theme" hidden>
+          <svg class="moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
+          </svg>
+          <svg class="sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+          </svg>
+        </button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap hero">
+        <div class="reveal">
+          <h1>Use your Android phone like a drive on Windows.</h1>
+          <p class="lede">Plug your phone in and its storage shows up in File Explorer with its own drive letter. Open, copy and move files the same way you would on your own local drives.</p>
+          <div class="cta">
+            <a class="button primary" href="https://github.com/Wilsoon7721/WinDroidFS/releases/latest">Download</a>
+            <div class="fine">
+              <span class="version" hidden></span>
+              <span>Needs the Windows app and the Android app. Windows 10 or 11, Android 7.0 or newer.</span>
+            </div>
+          </div>
+        </div>
+
+        <figure class="explorer reveal" aria-label="File Explorer showing the phone as drive Z:">
+          <div class="win-bar">This PC</div>
+          <div class="drive">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="2" y="6" width="20" height="12" rx="2" />
+              <circle cx="18" cy="12" r="1.2" />
+            </svg>
+            <span>Local Disk (C:)</span>
+          </div>
+          <div class="drive phone">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="6" y="2" width="12" height="20" rx="2.5" />
+              <line x1="10" y1="18.5" x2="14" y2="18.5" />
+            </svg>
+            <span>Android (Z:)</span>
+          </div>
+        </figure>
+      </section>
+
+      <section class="wrap" id="connect">
+        <h2 class="reveal">4 ways to connect</h2>
+        <p class="section-lede reveal">Most people only need Direct USB. Pick one to see how to set it up.</p>
+
+        <div class="methods reveal" role="tablist" aria-label="Connection methods">
+          <button class="method" type="button" role="tab" id="tab-usb" aria-controls="panel-usb" aria-selected="true"><b>Direct USB</b><span>Plug in and go. The fastest option.</span></button>
+          <button class="method" type="button" role="tab" id="tab-wifi" aria-controls="panel-wifi" aria-selected="false"><b>Wi-Fi</b><span>No cable, once the phone and PC are paired.</span></button>
+          <button class="method" type="button" role="tab" id="tab-tether" aria-controls="panel-tether" aria-selected="false"><b>USB tethering</b><span>A fallback for when direct USB won't work.</span></button>
+          <button class="method" type="button" role="tab" id="tab-adb" aria-controls="panel-adb" aria-selected="false">
+            <b>ADB Forwarding</b><span>Typically for developers. Reaches <code>Android/data</code>.</span>
+          </button>
+        </div>
+
+        <div class="panels reveal">
+          <div class="panel" role="tabpanel" id="panel-usb" aria-labelledby="tab-usb">
+            <h3>Direct USB</h3>
+            <ol>
+              <li>Open WinDroidFS on the PC. It sits in the tray, by the clock.</li>
+              <li>Open WinDroidFS on the phone.</li>
+              <li>Plug the phone in with a USB cable. If the phone asks which app should open the USB accessory, choose WinDroidFS.</li>
+            </ol>
+            <p>The drive shows up in File Explorer a few seconds later. A USB 3 port and cable make it noticeably faster.</p>
+            <aside class="note">
+              <b>If nothing happens</b>
+              <ul>
+                <li><b>Check the cable.</b> Some cables only charge and have no data wires at all. If the phone charges but the PC never notices it, try another cable.</li>
+                <li><b>Wake and unlock the phone</b> when you plug it in. The first time, Android asks which app should open the accessory, and it can't ask while the screen is off. Some phones also drop USB once the screen sleeps, which the app's <i>Keep screen awake</i> setting helps with.</li>
+                <li><b>On Samsung phones, check Auto Blocker</b> (Settings, Security and privacy, Auto Blocker). When it's on, it can block what the PC sends over the cable.</li>
+                <li><b>Check for USB restrictions.</b> Android's Advanced Protection mode, and some work or school phone policies, turn USB data off while the phone is locked.</li>
+              </ul>
+              <p>Still stuck? USB tethering, ADB and Wi-Fi each connect a different way, so one of them usually works.</p>
+            </aside>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-wifi" aria-labelledby="tab-wifi">
+            <h3>Wi-Fi</h3>
+            <ol>
+              <li>Put the phone and the PC on the same Wi-Fi network.</li>
+              <li>Pair them once. The easy way is to connect over USB one time, and they pair by themselves. Without a cable, tap <i>Pair a new PC</i> under Local Wi-Fi on the phone, choose <i>Pair a phone over Wi-Fi...</i> in the tray menu on the PC, and check that both show the same code.</li>
+              <li>From then on, keep the app open on the phone with no cable plugged in, and the PC connects on its own.</li>
+            </ol>
+            <p>Only paired PCs can connect, and everything sent over Wi-Fi is encrypted.</p>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-tether" aria-labelledby="tab-tether">
+            <h3>USB tethering</h3>
+            <ol>
+              <li>In the tray menu on the PC, set <i>Connect over</i> to <i>USB tethering only</i>.</li>
+              <li>Plug the phone in with a USB cable.</li>
+              <li>On the phone, turn on USB tethering (Settings, Hotspot &amp; tethering) and keep WinDroidFS open.</li>
+            </ol>
+            <p>Windows treats the phone as a network connection here, so it may use a little mobile data.</p>
+          </div>
+
+          <div class="panel" role="tabpanel" id="panel-adb" aria-labelledby="tab-adb">
+            <h3>ADB forwarding</h3>
+            <ol>
+              <li>On the phone, turn on Developer options (Settings, About phone, tap Build number 7 times), then USB debugging.</li>
+              <li>On the PC, install Android's <a href="https://developer.android.com/tools/releases/platform-tools">platform-tools</a> (adb).</li>
+              <li>Plug in and accept the <i>Allow USB debugging?</i> prompt on the phone.</li>
+            </ol>
+            <p>The PC starts the phone app for you. This is also the only way to reach <code>Android/data</code> and <code>Android/obb</code>, as long as the phone shares its whole storage.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" id="features">
+        <h2 class="reveal">Also in the app</h2>
+        <div class="features">
+          <article class="reveal">
+            <h3>Choose what the PC sees</h3>
+            <p>Share all of your storage, or only the folders you tick, like DCIM and Download. The rest doesn't show up on the PC at all.</p>
+          </article>
+          <article class="reveal">
+            <h3>Fingerprint before connecting</h3>
+            <p>Turn on <i>Require biometrics</i> and a PC sees nothing until you confirm on the phone, even one you've paired before.</p>
+          </article>
+          <article class="reveal">
+            <h3>Works with any program</h3>
+            <p>It's a real drive so any app can open files on it, and command-line utilities like <code>move</code>, <code>xcopy</code> and drag-and-drop all work.</p>
+          </article>
+          <article class="reveal">
+            <h3>Stays on your network</h3>
+            <p>The phone and PC talk directly over the cable or your Wi-Fi. No account, no cloud, nothing over the internet.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="wrap faq" id="faq">
+        <h2 class="reveal">Frequently Asked Questions</h2>
+        <details class="reveal">
+          <summary>Why not plug a USB cable directly to the phone?</summary>
+          <p>You can, but then Windows uses MTP, the phone's normal file transfer. It shows the phone as a device rather than a drive, so many programs can't open files on it, copies can't be scripted, and big transfers often stall or fail partway. WinDroidFS uses the same cable but gives you a proper drive letter.</p>
+        </details>
+        <details class="reveal">
+          <summary>How does this work?</summary>
+          <p>The Windows app creates a virtual drive using <a href="https://winfsp.dev">WinFsp</a>. Whenever File Explorer or another program touches that drive, the request goes to the Android app over USB or Wi-Fi, and the phone answers with the folder listing or the bytes asked for.</p>
+        </details>
+        <details class="reveal">
+          <summary>I plugged my phone in, but nothing happens.</summary>
+          <p>Usually it's one of these:</p>
+          <ul>
+            <li>The cable only charges. Try another one that you know carries data.</li>
+            <li>The phone was asleep or locked. Unlock it and plug in again, then allow WinDroidFS if Android asks.</li>
+            <li>On a Samsung phone, Auto Blocker (Settings, Security and privacy) is blocking USB commands. Turn it off and replug.</li>
+            <li>Advanced Protection mode or a work or school policy is turning off USB data while the phone is locked.</li>
+          </ul>
+          <p>If none of those help, try USB tethering or Wi-Fi from the list above.</p>
+        </details>
+        <details class="reveal">
+          <summary>Is the Android app on Google Play?</summary>
+          <p>Not right now. Get the APK from the <a href="https://github.com/Wilsoon7721/WinDroidFS/releases/latest">releases page</a>. If you'd like updates without checking back, <a href="https://github.com/ImranR98/Obtainium">Obtainium</a> can watch it for you.</p>
+        </details>
+        <details class="reveal">
+          <summary>Why can't I look into some folders in <code>Android</code>?</summary>
+          <p>Since Android 11, <code>Android/data</code> and <code>Android/obb</code> are off limits to apps, WinDroidFS included, because they hold other apps' private files. ADB forwarding gets around this, since adb is allowed in, as long as you share your whole storage.</p>
+        </details>
+        <details class="reveal">
+          <summary>How fast is it?</summary>
+          <p>Over a USB 2.0 port, copying 1,000 mixed files (150 MB) onto the phone took about 19 seconds, and copying them back took about 8. MTP is at its slowest with many small files like these, because it handles them one at a time. A USB 3.0+ port and cable will speed this up significantly, while Wi-Fi depends on your signal.</p>
+        </details>
+        <details class="reveal">
+          <summary>Something's broken. What can I do?</summary>
+          <p>Sorry about that. Please <a href="https://github.com/Wilsoon7721/WinDroidFS/issues">open an issue</a> with your phone model, your Windows version and the connection method you used.</p>
+        </details>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <span>Made by <a href="https://wilsoon.dev">Wilsoon</a>.</span>
+      <a href="https://github.com/Wilsoon7721/WinDroidFS">View on GitHub</a>
+    </footer>
+
+    <script src="main.js" defer></script>
+  </body>
+</html>
