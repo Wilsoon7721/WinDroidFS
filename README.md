@@ -2,6 +2,14 @@
 
 WinDroidFS bypasses the traditionally unstable Windows Media Transfer Protocol (MTP) by using the Android Open Accessory (AOA) protocol. It establishes a high-speed, raw binary pipe between your PC and your phone, treating your Android device like a standard local flash drive.
 
+## Screenshots
+
+<table>
+  <tr><th></th><th>Home</th><th>Getting started</th><th>Getting started (continued)</th><th>Settings</th><th>Settings (continued)</th></tr>
+  <tr><th>Light</th><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="130" alt="Home in light mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="130" alt="Getting started in light mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="130" alt="Getting started (continued) in light mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="130" alt="Settings in light mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="130" alt="Settings (continued) in light mode"></td></tr>
+  <tr><th>Dark</th><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/6.png" width="130" alt="Home in dark mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/7.png" width="130" alt="Getting started in dark mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/8.png" width="130" alt="Getting started (continued) in dark mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/9.png" width="130" alt="Settings in dark mode"></td><td><img src="apps/android-host/fastlane/metadata/android/en-US/images/phoneScreenshots/10.png" width="130" alt="Settings (continued) in dark mode"></td></tr>
+</table>
+
 ## Architecture
 
 WinDroidFS is built as a Turborepo-powered monorepo consisting of 3 components:
