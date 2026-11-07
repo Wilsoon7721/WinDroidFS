@@ -143,3 +143,6 @@ google-services.json
 .vscode
 # WinFsp installer for the Windows installer build (downloaded by hand, see apps/windows-daemon/README.md)
 apps/windows-daemon/installer/deps/
+
+# Icon source artwork, kept locally only
+/assets/
