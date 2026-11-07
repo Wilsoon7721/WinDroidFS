@@ -235,11 +235,12 @@ pub fn connect(identity: &Identity) -> Option<(PairedPhone, SocketAddr, TlsStrea
         for addr in addresses(&phone, &seen) {
             match connect_to(identity, Some(&phone.certificate), addr) {
                 Ok(stream) => {
-                    // Found somewhere new: remember it for next time.
+                    // Found somewhere new (or on a new port): remember it for next time.
                     let ip = addr.ip().to_string();
-                    if phone.addresses.first() != Some(&ip) {
+                    if phone.addresses.first() != Some(&ip) || phone.port != addr.port() {
                         phone.addresses.retain(|a| *a != ip);
                         phone.addresses.insert(0, ip);
+                        phone.port = addr.port();
                         let _ = save_paired(phone.clone());
                     }
                     return Some((phone, addr, stream));

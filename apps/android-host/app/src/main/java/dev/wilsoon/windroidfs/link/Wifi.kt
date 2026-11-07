@@ -39,8 +39,8 @@ import kotlinx.coroutines.flow.asStateFlow
 class PairedPc(val name: String, val certificate: ByteArray)
 
 object Wifi {
-    /** Tethering's port, on the Wi-Fi address instead. */
-    const val PORT = Tethering.PORT
+    /** Settings > TCP port. Tethering keeps 9999: a private cable link the PC can't discover a port on. */
+    fun port(context: Context) = AppSettings.load(context).tcpPort
 
     /** Advertised while waiting on Wi-Fi, so the PC finds this phone wherever the router puts it. Must match PHONE_SERVICE in wifi.rs. */
     const val SERVICE_TYPE = "_windroidfs._tcp"
@@ -124,7 +124,7 @@ object Wifi {
     private fun pairedFile(context: Context) = File(context.filesDir, PAIRED_FILE)
 
     /** TLS 1.3 on [address], and the PC must show a paired certificate. [anyPc] only for pairing by code, where comparing codes is the check. */
-    fun serverSocket(context: Context, address: InetAddress, port: Int = PORT, anyPc: Boolean = false): SSLServerSocket {
+    fun serverSocket(context: Context, address: InetAddress, port: Int = port(context), anyPc: Boolean = false): SSLServerSocket {
         val chain = arrayOf(certificate())
         val key = keyStore().getKey(KEY_ALIAS, null) as PrivateKey
         val trust = if (anyPc) AnyPc else PairedTrust(context.applicationContext)

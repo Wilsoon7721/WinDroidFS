@@ -16,12 +16,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.wilsoon.windroidfs.link.CodePairing
 import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
 
 // Settings screen
@@ -36,7 +38,9 @@ fun SettingsScreen(
     onRequireBiometricsChange: (Boolean) -> Unit,
     onKeepScreenAwakeChange: (Boolean) -> Unit,
     // Only called with a port that passed validation (1024-65535)
-    onPortChange: (Int) -> Unit
+    onPortChange: (Int) -> Unit,
+    // A port the phone couldn't listen on because another app has it
+    wifiPortTaken: Int? = null
 ) {
     BackHandler(onBack = onBack)
 
@@ -73,7 +77,7 @@ fun SettingsScreen(
 
             SectionLabel("Network", modifier = Modifier.padding(top = 12.dp))
             WinDroidCard {
-                PortField(currentPort = state.tcpPort, onPortChange = onPortChange)
+                PortField(currentPort = state.tcpPort, takenPort = wifiPortTaken, onPortChange = onPortChange)
             }
         }
     }
@@ -224,15 +228,35 @@ private fun SettingsSwitchRow(
     }
 }
 
+internal data class PortCheck(val usable: Boolean, val message: String, val warning: Boolean = false)
+
+internal fun checkPort(text: String): PortCheck {
+    val port = text.toIntOrNull() ?: return PortCheck(false, "Enter a port between 1024 and 65535.")
+    return when {
+        port !in 1..65535 -> PortCheck(false, "Enter a port between 1024 and 65535.")
+        port < 1024 -> PortCheck(false, "Android keeps ports below 1024 for the system, so no app can listen on $port.")
+        port == CodePairing.PORT -> PortCheck(false, "WinDroidFS already uses $port to pair by code.")
+        port == ADB_WIFI_PORT -> PortCheck(true, "adb over Wi-Fi also uses $port. Fine unless you've turned that on.", warning = true)
+        else -> PortCheck(true, "Default is 9999. Change only if another app uses it.")
+    }
+}
+
+// What `adb tcpip` listens on
+private const val ADB_WIFI_PORT = 5555
+
 // TCP port input
 @Composable
-private fun PortField(currentPort: Int, onPortChange: (Int) -> Unit) {
+private fun PortField(currentPort: Int, takenPort: Int?, onPortChange: (Int) -> Unit) {
     var text by remember(currentPort) { mutableStateOf(currentPort.toString()) }
-    val parsed = text.toIntOrNull()
-    val isValid = parsed != null && parsed in 1024..65535
+    val taken = takenPort != null && text.toIntOrNull() == takenPort
+    val check = if (taken) {
+        PortCheck(false, "Another app on this phone is already using $takenPort, so Wi-Fi can't connect. Pick another.")
+    } else {
+        checkPort(text)
+    }
 
     Text(
-        text = "TCP port (Wi-Fi & Tethering)",
+        text = "TCP port (Wi-Fi)",
         color = WinDroidTheme.colors.textPrimary,
         fontSize = 16.sp,
         fontWeight = FontWeight.Medium
@@ -244,14 +268,17 @@ private fun PortField(currentPort: Int, onPortChange: (Int) -> Unit) {
             // Digits only, max 5 characters.
             val cleaned = input.filter { it.isDigit() }.take(5)
             text = cleaned
-            cleaned.toIntOrNull()?.takeIf { it in 1024..65535 }?.let(onPortChange)
+            if (checkPort(cleaned).usable) onPortChange(cleaned.toInt())
         },
         singleLine = true,
-        isError = !isValid,
+        isError = !check.usable,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
         supportingText = {
-            Text(text = if (isValid) "Default is 9999. Change only if another app uses it." else "Enter a port between 1024 and 65535.")
+            Text(
+                text = check.message,
+                color = if (check.warning) WinDroidTheme.colors.warning else Color.Unspecified
+            )
         },
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()

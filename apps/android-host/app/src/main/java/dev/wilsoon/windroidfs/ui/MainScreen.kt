@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.wilsoon.windroidfs.link.Tethering
 import dev.wilsoon.windroidfs.ui.theme.WinDroidTheme
 
 @Composable
@@ -172,7 +173,7 @@ private fun IdleContent(
                 isExpanded = state.expandedMethod == ConnectionMethod.TETHERING,
                 onClick = { onMethodSelected(ConnectionMethod.TETHERING) }
             ) {
-                TetheringSetupContent(state.tcpPort, onOpenTetheringSettings)
+                TetheringSetupContent(Tethering.PORT, onOpenTetheringSettings)
             }
         }
 

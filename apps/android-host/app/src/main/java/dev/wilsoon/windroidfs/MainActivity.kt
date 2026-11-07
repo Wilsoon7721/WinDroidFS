@@ -224,6 +224,7 @@ class MainActivity : ComponentActivity() {
                     state = dashboardState.copy(
                         session = linkStatus?.takeUnless { it.waitingForPc }?.toSession(),
                         localIpAddress = wifi.address,
+                        tcpPort = settingsState.tcpPort,
                         pairedPcs = wifi.pairedPcs,
                         pairing = pairing,
                     ),
@@ -256,6 +257,7 @@ class MainActivity : ComponentActivity() {
                     onRequireBiometricsChange = { changeSettings(settingsState.copy(requireBiometrics = it)) },
                     onKeepScreenAwakeChange = { changeSettings(settingsState.copy(keepScreenAwake = it)) },
                     onPortChange = { changeSettings(settingsState.copy(tcpPort = it)) },
+                    wifiPortTaken = LinkState.wifiPortTaken.collectAsState().value
                 )
             }
         }

@@ -42,6 +42,7 @@ import java.io.IOException
 import javax.net.ssl.SSLSocket
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.BindException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.ConcurrentHashMap
@@ -78,6 +79,14 @@ object LinkState {
         mutableStatus.value = status
     }
 
+    private val mutableWifiPortTaken = MutableStateFlow<Int?>(null)
+    /** Settings > TCP port: another app already listens on it, so Wi-Fi can't. */
+    val wifiPortTaken: StateFlow<Int?> = mutableWifiPortTaken.asStateFlow()
+
+    internal fun publishWifiPortTaken(port: Int?) {
+        mutableWifiPortTaken.value = port
+    }
+
     /** Disconnect was pressed: don't link again until the cable is replugged or tethering toggled. */
     @Volatile var endedByUser = false
         internal set
@@ -92,6 +101,7 @@ class LinkService : Service() {
     @Volatile private var tetherAddress: InetAddress? = null
     @Volatile private var wifiAddress: InetAddress? = null
     @Volatile private var wifiAdvert: Advert? = null
+    @Volatile private var wifiPort = 0
     @Volatile private var locked = false
     private var detachRegistered = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -160,6 +170,7 @@ class LinkService : Service() {
         routes.clear()
         wifiAdvert?.stop()
         wifiAdvert = null
+        LinkState.publishWifiPortTaken(null)
         ticker?.shutdownNow()
         ticker = null
         if (detachRegistered) unregisterReceiver(detachReceiver)
@@ -243,16 +254,24 @@ class LinkService : Service() {
     private fun offerWifi() {
         if (routes.containsKey(LinkTransport.WIFI) || !Wifi.available(this)) return
         val address = Wifi.address() ?: return
+        val port = Wifi.port(this)
         val server = try {
-            Wifi.serverSocket(this, address)
+            Wifi.serverSocket(this, address, port)
         } catch (e: Exception) {
-            Log.e(TAG, "Couldn't listen on Wi-Fi at $address", e)
+            // Tried again every second, so only say so once.
+            val taken = (e as? BindException)?.let { port }
+            if (LinkState.wifiPortTaken.value != taken || taken == null) {
+                Log.e(TAG, "Couldn't listen on Wi-Fi at $address:$port", e)
+            }
+            LinkState.publishWifiPortTaken(taken)
             return
         }
+        LinkState.publishWifiPortTaken(null)
         wifiAddress = address
+        wifiPort = server.localPort
         val name = deviceName()
         wifiAdvert?.stop()
-        wifiAdvert = Advert(this, Wifi.SERVICE_TYPE, name, Wifi.PORT, mapOf(
+        wifiAdvert = Advert(this, Wifi.SERVICE_TYPE, name, wifiPort, mapOf(
             "id" to Wifi.fingerprint(Wifi.certificate().encoded),
             "name" to name,
         ))
@@ -374,7 +393,7 @@ class LinkService : Service() {
             Wifi.pair(this, pc.hostName.ifEmpty { "PC" }, pc.certificate.toByteArray())
             response.setSuccess(true)
                 .setCertificate(ByteString.copyFrom(Wifi.certificate().encoded))
-                .setWifiPort(Wifi.PORT)
+                .setWifiPort(Wifi.port(this))
             Wifi.address()?.hostAddress?.let(response::addWifiAddresses)
             Log.i(TAG, "Paired with ${pc.hostName} for Wi-Fi")
         } catch (e: Exception) {
@@ -526,7 +545,9 @@ class LinkService : Service() {
                 Log.i(TAG, "USB debugging ended")
                 routes[LinkTransport.ADB]?.let(::quietlyClose)
             }
-            if (routes.containsKey(LinkTransport.WIFI) && (Wifi.address() != wifiAddress || !Wifi.available(this))) {
+            if (routes.containsKey(LinkTransport.WIFI) &&
+                (Wifi.address() != wifiAddress || !Wifi.available(this) || Wifi.port(this) != wifiPort)
+            ) {
                 Log.i(TAG, "Wi-Fi changed")
                 routes[LinkTransport.WIFI]?.let(::quietlyClose)
             }

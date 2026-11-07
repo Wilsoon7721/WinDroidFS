@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object CodePairing {
     /** Must match PAIRING_SERVICE in pairing.rs. */
     private const val SERVICE_TYPE = "_windroidfs-pair._tcp"
-    private const val PORT = 9998
+    const val PORT = 9998
     /** For a PC to turn up, and then for the owner to compare codes. */
     private const val WAIT_MS = 120_000
     private const val TAG = "WinDroid"
@@ -170,7 +170,7 @@ object CodePairing {
                         answers.poll(WAIT_MS.toLong(), TimeUnit.MILLISECONDS) == true -> {
                             Wifi.pair(context, host, pcCert)
                             WifiState.refresh(context)
-                            result.setSuccess(true).setWifiPort(Wifi.PORT)
+                            result.setSuccess(true).setWifiPort(Wifi.port(context))
                             finish(true, "Paired with $host. It can connect over Wi-Fi from now on.")
                         }
                         else -> {
