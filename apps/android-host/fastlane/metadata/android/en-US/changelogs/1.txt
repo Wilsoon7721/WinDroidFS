@@ -1,0 +1,5 @@
+First release.
+• Connect over Direct USB, Local Wi-Fi, USB tethering or ADB
+• Share all of your storage or only the folders you pick
+• Optional biometric confirmation before a PC sees any files
+• Keep the screen awake while a PC is connected

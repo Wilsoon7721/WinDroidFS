@@ -1,0 +1,29 @@
+WinDroidFS gives your phone its own drive letter in Windows File Explorer. Open, copy and move files the same way you would on your own local drives, without MTP.
+
+You need the WinDroidFS app for Windows too. Download it from https://windroidfs.wilsoon.dev or the GitHub releases page.
+
+<b>4 ways to connect</b>
+<ul>
+<li><b>Direct USB:</b> plug your phone in. No setup on the phone.</li>
+<li><b>Local Wi-Fi:</b> pair once, then connect without a cable.</li>
+<li><b>USB tethering:</b> for when Direct USB is blocked.</li>
+<li><b>ADB forwarding:</b> for developers, and the only way to reach Android/data.</li>
+</ul>
+
+<b>A real drive</b>
+Any program can open files on it, and robocopy, move, xcopy and drag-and-drop all work. Copying 1,000 mixed files (150 MB) onto the phone over USB 2.0 takes about 19 seconds.
+
+<b>You decide what the PC sees</b>
+<ul>
+<li>Share all of your storage, or only the folders you tick, like DCIM and Download.</li>
+<li>Turn on Require biometrics and a PC sees nothing until you confirm on the phone, even one you've paired before.</li>
+<li>Keep the screen awake while a PC is connected, so transfers don't stop when the phone locks.</li>
+</ul>
+
+<b>Stays on your network</b>
+The phone and PC talk directly over the cable or your Wi-Fi. No account, no cloud, no tracking.
+
+<b>Why All Files Access?</b>
+WinDroidFS shows your storage as a drive, so it needs to read and write every file you choose to share, not just photos and media. Nothing leaves your phone except to the PC you connect.
+
+WinDroidFS is open source under the GPL-3.0.
