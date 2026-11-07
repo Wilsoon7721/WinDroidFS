@@ -533,14 +533,17 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
 /// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
 fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<String> {
     let mut asked = false;
+    // Right after the handshake the app is often still opening, so the first ping failing is normal.
+    let patience = Instant::now() + Duration::from_secs(4);
     loop {
         match phone.ping() {
             Ok(name) => return Some(name),
             Err(_) if !phone.is_connected() => return None,
             Err(e) => {
-                if !asked {
+                log::debug!("No answer from the app yet: {e}");
+                if !asked && Instant::now() >= patience {
                     asked = true;
-                    log::info!("📱 Waiting for the WinDroidFS app on the phone ({e}).");
+                    log::info!("📱 Waiting for the WinDroidFS app on the phone.");
                     log::info!(
                         "   -> Open it on the phone (and update it if it's an older build)."
                     );
