@@ -27,6 +27,22 @@ The Android application allows the phone to control several settings:
 - **Biometric Authentication:** The user can choose to enable or disable biometric authentication.
 - **Foreground Service:** The user can choose to enable or disable the foreground service.
 
+## Verifying the Android App
+
+Every APK on the releases page is signed with the same key. Before installing, or in an app like [AppVerifier](https://github.com/soupslurpr/AppVerifier), check that it matches:
+
+- **Package name:** `dev.wilsoon.windroidfs`
+- **SHA-256 hash of signing certificate:**
+  `E6:95:D9:25:BF:29:45:8F:D8:C9:8B:80:D0:5A:93:0D:65:9E:5D:7E:00:45:EF:EC:CD:EA:C0:F7:F0:39:80:63`
+
+To check a downloaded APK on your PC, use `apksigner` from the Android SDK build-tools:
+
+```bash
+apksigner verify --print-certs WinDroidFS.apk
+```
+
+If the hash doesn't match, don't install it. An APK signed with any other key didn't come from me and Android won't update it over a genuine copy either.
+
 ## Potential New Features
 
 If you have additional ideas, feel free to open an issue or start a pull request.

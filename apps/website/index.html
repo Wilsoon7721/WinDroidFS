@@ -290,6 +290,17 @@
           <p>Not right now. Get the APK from the <a href="https://github.com/Wilsoon7721/WinDroidFS/releases/latest">releases page</a>. If you'd like updates without checking back, <a href="https://github.com/ImranR98/Obtainium">Obtainium</a> can watch it for you.</p>
         </details>
         <details class="reveal">
+          <summary>How do I know the APK is really from you?</summary>
+          <p>Every release is signed with the same key. Check the APK against these before installing, by hand or with <a href="https://github.com/soupslurpr/AppVerifier">AppVerifier</a>:</p>
+          <dl class="verify">
+            <dt>Package name</dt>
+            <dd><code>dev.wilsoon.windroidfs</code></dd>
+            <dt>SHA-256 hash of signing certificate</dt>
+            <dd><code class="fingerprint">E6:95:D9:25:BF:29:45:8F:D8:C9:8B:80:D0:5A:93:0D:65:9E:5D:7E:00:45:EF:EC:CD:EA:C0:F7:F0:39:80:63</code></dd>
+          </dl>
+          <p>If it doesn't match, don't install it. Android also refuses to update the app with an APK signed by anyone else.</p>
+        </details>
+        <details class="reveal">
           <summary>Why can't I look into some folders in <code>Android</code>?</summary>
           <p>Since Android 11, <code>Android/data</code> and <code>Android/obb</code> are off limits to apps, WinDroidFS included, because they hold other apps' private files. ADB forwarding gets around this, since adb is allowed in, as long as you share your whole storage.</p>
         </details>

@@ -139,6 +139,10 @@ html:not(.js) .panel + .panel { margin-top: 28px; }
 .faq details:last-of-type { border-bottom: 1px solid var(--border); }
 .faq summary { cursor: pointer; font-weight: 600; font-size: 17px; }
 .faq details p { color: var(--muted); margin: 10px 0 4px; }
+.verify { margin: 12px 0; display: grid; gap: 2px; font-size: 15px; }
+.verify dt { color: var(--muted); }
+.verify dd { margin: 0 0 8px; }
+.fingerprint { display: block; word-break: break-all; line-height: 1.5; }
 
 .foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--border); padding-top: 20px; padding-bottom: 40px; color: var(--muted); font-size: 14px; }
 .foot a { color: var(--muted); }
