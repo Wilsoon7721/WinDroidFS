@@ -83,7 +83,6 @@ data class SettingsUiState(
     ),
     val requireBiometrics: Boolean = false,
     val keepScreenAwake: Boolean = false,
-    val runAsForegroundService: Boolean = true,
     val tcpPort: Int = 9999
 )
 

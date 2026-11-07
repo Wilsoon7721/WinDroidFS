@@ -59,7 +59,6 @@ private fun UiTour(dark: Boolean) {
                     },
                     onRequireBiometricsChange = { settings = settings.copy(requireBiometrics = it) },
                     onKeepScreenAwakeChange = { settings = settings.copy(keepScreenAwake = it) },
-                    onForegroundServiceChange = { settings = settings.copy(runAsForegroundService = it) },
                     onPortChange = { settings = settings.copy(tcpPort = it) }
                 )
             }

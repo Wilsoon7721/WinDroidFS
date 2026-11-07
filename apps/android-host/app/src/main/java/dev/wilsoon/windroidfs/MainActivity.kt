@@ -185,7 +185,6 @@ class MainActivity : ComponentActivity() {
                     },
                     onRequireBiometricsChange = { settingsState = settingsState.copy(requireBiometrics = it) },
                     onKeepScreenAwakeChange = { settingsState = settingsState.copy(keepScreenAwake = it) },
-                    onForegroundServiceChange = { settingsState = settingsState.copy(runAsForegroundService = it) },
                     onPortChange = { settingsState = settingsState.copy(tcpPort = it) }
                 )
             }

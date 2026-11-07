@@ -35,7 +35,6 @@ fun SettingsScreen(
     onFolderToggle: (folder: String, exposed: Boolean) -> Unit,
     onRequireBiometricsChange: (Boolean) -> Unit,
     onKeepScreenAwakeChange: (Boolean) -> Unit,
-    onForegroundServiceChange: (Boolean) -> Unit,
     // Only called with a port that passed validation (1024-65535)
     onPortChange: (Int) -> Unit
 ) {
@@ -64,13 +63,6 @@ fun SettingsScreen(
 
             SectionLabel("Service", modifier = Modifier.padding(top = 12.dp))
             WinDroidCard {
-                SettingsSwitchRow(
-                    title = "Run as foreground service",
-                    subtitle = "Pins a notification so Android doesn't kill the connection in the background.",
-                    checked = state.runAsForegroundService,
-                    onCheckedChange = onForegroundServiceChange
-                )
-                SettingsDivider()
                 SettingsSwitchRow(
                     title = "Keep screen awake",
                     subtitle = "Some phones drop USB connections when the screen turns off.",
@@ -288,7 +280,6 @@ private fun PreviewSettings(dark: Boolean) {
             },
             onRequireBiometricsChange = { state = state.copy(requireBiometrics = it) },
             onKeepScreenAwakeChange = { state = state.copy(keepScreenAwake = it) },
-            onForegroundServiceChange = { state = state.copy(runAsForegroundService = it) },
             onPortChange = { state = state.copy(tcpPort = it) }
         )
     }
