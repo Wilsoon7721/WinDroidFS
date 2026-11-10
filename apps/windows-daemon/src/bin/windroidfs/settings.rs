@@ -20,6 +20,8 @@ pub struct Settings {
     pub use_webdav: bool,
     /// Keep a log file (see `windroidfs::logging`).
     pub log: bool,
+    /// The notice about Dokan breaking elevated launches from the phone has been shown (see `windroidfs::dokan`).
+    pub dokan_notice_shown: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +35,7 @@ impl Default for Settings {
             hide_dotfiles: true,
             use_webdav: false,
             log: true,
+            dokan_notice_shown: false,
         }
     }
 }
@@ -78,6 +81,9 @@ impl Settings {
                 "hide_dotfiles" => settings.hide_dotfiles = flag(settings.hide_dotfiles),
                 "use_webdav" => settings.use_webdav = flag(settings.use_webdav),
                 "log" => settings.log = flag(settings.log),
+                "dokan_notice_shown" => {
+                    settings.dokan_notice_shown = flag(settings.dokan_notice_shown)
+                }
                 _ => {}
             }
         }
@@ -97,13 +103,14 @@ impl Settings {
             LinkChoice::Wifi => "wifi",
         };
         format!(
-            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
             self.hide_dotfiles,
             self.use_webdav,
             self.log,
+            self.dokan_notice_shown,
         )
     }
 }
@@ -156,6 +163,7 @@ mod tests {
                 hide_dotfiles: false,
                 use_webdav: true,
                 log: false,
+                dokan_notice_shown: true,
             },
         ] {
             assert_eq!(Settings::parse(&settings.to_text()), settings);

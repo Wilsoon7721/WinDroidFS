@@ -1,5 +1,6 @@
 pub mod adb;
 pub mod adb_files;
+pub mod dokan;
 pub mod driver;
 pub mod frame;
 pub mod global_drive;
