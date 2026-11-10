@@ -19,7 +19,7 @@
 ; (from https://winfsp.dev/rel/). WinFsp's FLOSS exception allows bundling it only unmodified.
 
 #define AppName "WinDroidFS"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 #define AppPublisher "Wilson Oon"
 #define ServiceExe "windroidfs-service.exe"
 #define DaemonExe "windows-daemon.exe"
