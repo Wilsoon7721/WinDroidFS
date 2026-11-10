@@ -74,7 +74,9 @@ Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qn /nores
 Filename: "{app}\{#ServiceExe}"; Parameters: "install"; Flags: runhidden waituntilterminated; StatusMsg: "Registering the WinDroidFS driver service..."
 ; Start the tray app as the user who ran setup, not as the elevated installer: it mounts drives
 ; and writes settings for that user. --installed makes it say where it went.
-Filename: "{app}\{#TrayExe}"; Parameters: "--installed"; Description: "Start WinDroidFS now"; Flags: postinstall nowait runasoriginaluser
+Filename: "{app}\{#TrayExe}"; Parameters: "--installed"; Description: "Start WinDroidFS now"; Flags: postinstall nowait runasoriginaluser; Check: not WizardSilent
+; An update from the tray runs setup silently (see src/updater.rs): start the tray again, without the first-run popup.
+Filename: "{app}\{#TrayExe}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallRun]
 ; Close the tray app first, so its files can be deleted. Ending the process also ends its

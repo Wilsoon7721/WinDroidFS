@@ -13,6 +13,7 @@ pub mod phone_versions;
 pub mod session;
 pub mod socket;
 pub mod tether;
+pub mod updater;
 pub mod usb_watch;
 pub mod webdav;
 pub mod wifi;

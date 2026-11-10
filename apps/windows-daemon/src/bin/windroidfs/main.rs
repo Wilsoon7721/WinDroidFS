@@ -3,9 +3,10 @@
 mod autostart;
 mod notify;
 mod settings;
+mod updates;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -143,6 +144,8 @@ struct Shared {
     /// The slow link speed already notified about, so reconnecting over the same cable doesn't repeat it. Cleared when a fast connection comes along.
     warned_speed: Mutex<Option<UsbSpeed>>,
     ui_thread: u32,
+    /// Asks the updates thread to check for a newer PC app (see `updates`).
+    update_checks: mpsc::Sender<updates::Check>,
 }
 
 impl Shared {
@@ -211,6 +214,7 @@ fn main() {
     UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
     unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) };
 
+    let (update_checks, checks) = mpsc::channel();
     let shared = Arc::new(Shared {
         settings: Mutex::new(settings),
         status: Mutex::new(Status::WaitingForPhone),
@@ -222,7 +226,9 @@ fn main() {
         watch: UsbWatch::new(),
         warned_speed: Mutex::new(None),
         ui_thread: unsafe { GetCurrentThreadId() },
+        update_checks,
     });
+    updates::spawn(shared.clone(), checks);
 
     let supervisor = {
         let shared = shared.clone();
@@ -362,7 +368,9 @@ fn supervise(shared: &Shared) {
                 required,
                 phone_shows_it,
             ),
-            Event::PhoneNewer => {}
+            Event::PhoneNewer => {
+                let _ = shared.update_checks.send(updates::Check::PhoneNewer);
+            }
             Event::Mounted {
                 drive,
                 device_name,
@@ -431,6 +439,7 @@ struct Tray {
     pair: MenuItem,
     forget: MenuItem,
     autostart: CheckMenuItem,
+    check_updates: MenuItem,
     about: MenuItem,
     quit: MenuItem,
     /// The status version last shown
@@ -496,6 +505,11 @@ impl Tray {
             ),
             toggle("Read-only", |s| &mut s.read_only, true),
             toggle("Hide dot-files", |s| &mut s.hide_dotfiles, true),
+            toggle(
+                "Check for updates automatically",
+                |s| &mut s.check_for_updates,
+                false,
+            ),
             // Troubleshooting
             toggle("Use WebDAV instead of WinFsp", |s| &mut s.use_webdav, true),
             Toggle {
@@ -504,18 +518,19 @@ impl Tray {
             },
         ];
         let options_menu = Submenu::new("Options", true);
-        for toggle in &toggles[..3] {
+        for toggle in &toggles[..4] {
             options_menu.append(&toggle.item)?;
         }
         let open_log = MenuItem::new("Open log folder", true, None);
         let troubleshooting_menu = Submenu::new("Troubleshooting", true);
-        for toggle in &toggles[3..] {
+        for toggle in &toggles[4..] {
             troubleshooting_menu.append(&toggle.item)?;
         }
         troubleshooting_menu.append(&open_log)?;
 
         let autostart =
             CheckMenuItem::new("Start with Windows", true, autostart::is_enabled(), None);
+        let check_updates = MenuItem::new("Check for updates...", true, None);
         let about = MenuItem::new("About WinDroidFS", true, None);
         let quit = MenuItem::new("Quit WinDroidFS", true, None);
 
@@ -532,6 +547,7 @@ impl Tray {
             &troubleshooting_menu,
             &autostart,
             &PredefinedMenuItem::separator(),
+            &check_updates,
             &about,
             &quit,
         ];
@@ -557,6 +573,7 @@ impl Tray {
             pair,
             forget,
             autostart,
+            check_updates,
             about,
             quit,
             shown_version: 0,
@@ -604,6 +621,8 @@ impl Tray {
             forget_wifi_phones();
         } else if id == self.open_log.id() {
             open_log_folder();
+        } else if id == self.check_updates.id() {
+            let _ = shared.update_checks.send(updates::Check::Manual);
         } else if id == self.about.id() {
             show_about();
         } else if id == self.enabled.id() {

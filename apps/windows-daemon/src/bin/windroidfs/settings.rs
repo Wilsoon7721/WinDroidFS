@@ -22,6 +22,10 @@ pub struct Settings {
     pub log: bool,
     /// The notice about Dokan breaking elevated launches from the phone has been shown (see `windroidfs::dokan`).
     pub dokan_notice_shown: bool,
+    /// Look for a newer PC app on GitHub now and then (see `updates`). Checking from the menu works either way.
+    pub check_for_updates: bool,
+    /// The newest PC app version an automatic check already offered, so it's offered once, not at every start.
+    pub update_offered: String,
     /// The phone app version code already said to be out of date on this PC, so it's said once per version.
     pub phone_update_noted: u32,
 }
@@ -38,6 +42,8 @@ impl Default for Settings {
             use_webdav: false,
             log: true,
             dokan_notice_shown: false,
+            check_for_updates: true,
+            update_offered: String::new(),
             phone_update_noted: 0,
         }
     }
@@ -87,6 +93,10 @@ impl Settings {
                 "dokan_notice_shown" => {
                     settings.dokan_notice_shown = flag(settings.dokan_notice_shown)
                 }
+                "check_for_updates" => {
+                    settings.check_for_updates = flag(settings.check_for_updates)
+                }
+                "update_offered" => settings.update_offered = value.to_string(),
                 "phone_update_noted" => {
                     settings.phone_update_noted = value.parse().unwrap_or_default()
                 }
@@ -109,7 +119,7 @@ impl Settings {
             LinkChoice::Wifi => "wifi",
         };
         format!(
-            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\nphone_update_noted={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\ncheck_for_updates={}\nupdate_offered={}\nphone_update_noted={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
@@ -117,6 +127,8 @@ impl Settings {
             self.use_webdav,
             self.log,
             self.dokan_notice_shown,
+            self.check_for_updates,
+            self.update_offered,
             self.phone_update_noted,
         )
     }
@@ -171,6 +183,8 @@ mod tests {
                 use_webdav: true,
                 log: false,
                 dokan_notice_shown: true,
+                check_for_updates: false,
+                update_offered: "1.2.0".into(),
                 phone_update_noted: 2,
             },
         ] {
@@ -199,5 +213,6 @@ mod tests {
         let settings = Settings::parse("enabled=false\ndrive=auto\n");
         assert!(!settings.enabled);
         assert!(settings.open_on_mount && settings.hide_dotfiles && settings.log);
+        assert!(settings.check_for_updates);
     }
 }
