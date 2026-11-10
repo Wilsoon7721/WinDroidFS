@@ -15,6 +15,7 @@ fn main() {
         .unwrap();
 
     embed_icon(&out_dir);
+    embed_manifest();
 
     // Link WinFsp's DLL as delay-loaded. Without this the .exe would fail to start at all on a machine without WinFsp, instead of starting and falling back to the WebDAV mount.
     // The DLL is only loaded when the WinFsp code first runs (see winfsp_fs::load_winfsp).
@@ -59,6 +60,21 @@ fn embed_icon(out_dir: &Path) {
             println!("cargo:warning=could not run rc.exe ({e}); building without an exe icon")
         }
     }
+}
+
+// Embed manifest to prevent unnecessary DPI scaling
+fn embed_manifest() {
+    println!("cargo:rerun-if-changed=assets/windroidfs.manifest");
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    let manifest =
+        Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/windroidfs.manifest");
+    println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }
 
 /// `$WINDROIDFS_RC` wins if set; otherwise take the newest Windows SDK's x64 rc.exe.
