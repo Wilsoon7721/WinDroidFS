@@ -47,6 +47,10 @@ OutputBaseFilename=WinDroidFS-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The app icon in place of Inno's default box (top right) and disc (Finish page, left).
+; Each lists one PNG per DPI scale, 100% to 250%; Setup picks the closest.
+WizardSmallImageFile=images\small-100.png,images\small-125.png,images\small-150.png,images\small-200.png,images\small-250.png
+WizardImageFile=images\large-100.png,images\large-125.png,images\large-150.png,images\large-200.png,images\large-250.png
 
 [Files]
 ; Paths are relative to this .iss file (installer\), so step up to the crate root.
