@@ -57,6 +57,8 @@ const ABOUT_TEXT: &str = concat!(
     "WinDroidFS ",
     env!("CARGO_PKG_VERSION"),
     "\nMounts your Android phone as a drive over USB.\n\n",
+    "Copyright (C) 2026 Wilson Oon\n",
+    "Licensed under the GPL-3.0\n\n",
     "Uses WinFsp - Windows File System Proxy,\n",
     "Copyright (C) Bill Zissimopoulos\n",
     "https://github.com/winfsp/winfsp",

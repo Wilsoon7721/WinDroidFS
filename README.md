@@ -2,6 +2,10 @@
 
 WinDroidFS bypasses the traditionally unstable Windows Media Transfer Protocol (MTP) by using the Android Open Accessory (AOA) protocol. It establishes a high-speed, raw binary pipe between your PC and your phone, treating your Android device like a standard local flash drive.
 
+## Download
+
+Official builds are only published on this repository's [Releases page](https://github.com/Wilsoon7721/WinDroidFS/releases). I can't guarantee the security of builds from anywhere else, including modified copies of this project.
+
 ## Screenshots
 
 <table>
@@ -60,5 +64,7 @@ These are some of the ideas I thought about but haven't actually started researc
 - Allowing rooted devices to access their root filesystem
 
 ## License
+
+Copyright (C) 2026 Wilson Oon
 
 WinDroidFS is licensed under the [GNU General Public License v3.0](LICENSE).
