@@ -12,6 +12,7 @@ use rusb::{
 
 use crate::android::{aoa_identities, is_aoa_identity, is_normal_android_identity};
 use crate::driver;
+use crate::global_drive;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
@@ -695,7 +696,36 @@ fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> O
     }
 }
 
-/// Mount the phone and keep it mounted until stopped or the phone goes away. WinFsp when it's available, otherwise the WebDAV fallback.
+/// Asks the driver service to publish the drive globally
+fn publish_drive(drive: char) -> bool {
+    match send(&Request::PublishDrive { letter: drive }) {
+        Ok(Response::Ok { detail }) => {
+            log::info!("🛡️  {detail}.");
+            true
+        }
+        Ok(Response::Err { message }) => {
+            log::warn!("⚠️  Programs run as administrator won't see {drive}: ({message}).");
+            false
+        }
+        Ok(Response::Pong) => false,
+        Err(e) => {
+            log::warn!(
+                "⚠️  Programs run as administrator won't see {drive}: (the driver service isn't reachable: {e})."
+            );
+            false
+        }
+    }
+}
+
+fn unpublish_drive(drive: char) {
+    match send(&Request::UnpublishDrive { letter: drive }) {
+        Ok(Response::Err { message }) => log::warn!("⚠️  {message}"),
+        Err(e) => log::warn!("⚠️  Couldn't take back {drive}: from elevated programs: {e}"),
+        Ok(_) => {}
+    }
+}
+
+/// Mount the phone and keep it mounted until stopped or the phone goes away. WinFsp when available, WebDAV as fallback
 fn serve(
     phone: PhoneClient,
     device_name: &str,
@@ -724,6 +754,8 @@ fn serve(
                     );
                 }
                 log::info!("💽 \"{label}\" is mounted at {}:\\.", mount.drive);
+                global_drive::label_in_explorer(label);
+                let published = publish_drive(mount.drive);
                 on_event(Event::Mounted {
                     drive: mount.drive,
                     device_name: device_name.to_string(),
@@ -736,6 +768,9 @@ fn serve(
                     }
                 });
                 log::info!("Unmounting {}:...", mount.drive);
+                if published {
+                    unpublish_drive(mount.drive);
+                }
                 mount.unmount();
                 say_goodbye(&phone, &ended);
                 return ended;

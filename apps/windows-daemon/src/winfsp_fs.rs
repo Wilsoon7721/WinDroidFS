@@ -8,18 +8,24 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    LocalFree, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_DEVICE_NOT_CONNECTED,
-    STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_FILE_IS_A_DIRECTORY,
-    STATUS_INVALID_PARAMETER, STATUS_IO_DEVICE_ERROR, STATUS_MEDIA_WRITE_PROTECTED,
-    STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+    CloseHandle, HANDLE, LocalFree, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
+    STATUS_DEVICE_NOT_CONNECTED, STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE,
+    STATUS_FILE_IS_A_DIRECTORY, STATUS_INVALID_PARAMETER, STATUS_IO_DEVICE_ERROR,
+    STATUS_MEDIA_WRITE_PROTECTED, STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION,
+    STATUS_OBJECT_NAME_NOT_FOUND,
 };
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+};
+use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_READONLY, GetLogicalDrives,
 };
 use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::core::PWSTR;
 use winfsp::constants::FspCleanupFlags;
 use winfsp::filesystem::{
     DirBuffer, DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo,
@@ -30,6 +36,7 @@ use winfsp::{FspError, U16CStr};
 
 use crate::adb::AdbPhone;
 use crate::adb_files::{self, AdbFiles, RESTRICTED_FOLDERS};
+use crate::global_drive;
 use crate::phone::{self, MAX_READ, MAX_WRITE, PhoneClient, PhoneError, ReadChunk};
 use crate::windroid::{self as proto, ErrorCode};
 
@@ -333,8 +340,8 @@ pub fn mount(phone: PhoneClient, options: &MountOptions) -> Result<Mount, MountE
         .persistent_acls(false)
         .read_only_volume(options.read_only)
         .post_cleanup_when_modified_only(true);
+    params.prefix(format!(r"\{}\{}", global_drive::SERVER_NAME, options.label));
 
-    // The host's own calls return `windows::core::Error`, not the crate's `FspError`.
     let failed = |what: &str, e: &dyn std::fmt::Display| MountError::Failed(format!("{what}: {e}"));
     let mut host: FileSystemHost<PhoneFs> =
         FileSystemHost::new(params, fs).map_err(|e| failed("couldn't create the volume", &e))?;
@@ -401,9 +408,45 @@ pub fn volume_label(device_name: &str) -> String {
     }
 }
 
-/// A fixed security descriptor for every file: owned by Administrators, full access for SYSTEM, Administrators and Everyone.
+/// Security descriptor granting full access only to the mounting user, plus SYSTEM and ALL APPLICATION PACKAGES, allowing Windows scanning and app usage.
+fn security_sddl(user_sid: &str) -> String {
+    format!("O:{user_sid}G:{user_sid}D:P(A;;FA;;;{user_sid})(A;;FA;;;SY)(A;;FA;;;AC)")
+}
+
+/// The SID of the user this process runs as
+fn current_user_sid() -> Result<String, String> {
+    let mut token: HANDLE = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err("couldn't open this process's token".into());
+    }
+    let mut buf = vec![0u64; 64];
+    let mut len = 0u32;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut len,
+        )
+    };
+    unsafe { CloseHandle(token) };
+    if ok == 0 {
+        return Err("couldn't read this process's user".into());
+    }
+    let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    let mut sid: PWSTR = null_mut();
+    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) } == 0 || sid.is_null() {
+        return Err("couldn't format this process's user".into());
+    }
+    let len = (0..).take_while(|&i| unsafe { *sid.add(i) } != 0).count();
+    let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sid, len) });
+    unsafe { LocalFree(sid as _) };
+    Ok(text)
+}
+
 fn build_security_descriptor() -> Result<Vec<u8>, String> {
-    let sddl = to_wide("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)");
+    let sddl = to_wide(&security_sddl(&current_user_sid()?));
     let mut descriptor: *mut c_void = null_mut();
     let mut len = 0u32;
     let ok = unsafe {
@@ -1068,6 +1111,23 @@ mod tests {
 
     fn wide(s: &str) -> U16CString {
         U16CString::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn only_the_mounting_user_gets_in() {
+        let sid = current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        let sddl = security_sddl(&sid);
+        assert!(
+            !sddl.contains(";WD)"),
+            "Everyone must not have access: {sddl}"
+        );
+        assert!(
+            !sddl.contains(";BA)"),
+            "other administrators must not have access: {sddl}"
+        );
+        assert!(sddl.contains(&format!("(A;;FA;;;{sid})")));
+        assert!(build_security_descriptor().is_ok());
     }
 
     #[test]
