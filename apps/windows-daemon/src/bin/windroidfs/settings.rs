@@ -22,6 +22,8 @@ pub struct Settings {
     pub log: bool,
     /// The notice about Dokan breaking elevated launches from the phone has been shown (see `windroidfs::dokan`).
     pub dokan_notice_shown: bool,
+    /// The phone app version code already said to be out of date on this PC, so it's said once per version.
+    pub phone_update_noted: u32,
 }
 
 impl Default for Settings {
@@ -36,6 +38,7 @@ impl Default for Settings {
             use_webdav: false,
             log: true,
             dokan_notice_shown: false,
+            phone_update_noted: 0,
         }
     }
 }
@@ -84,6 +87,9 @@ impl Settings {
                 "dokan_notice_shown" => {
                     settings.dokan_notice_shown = flag(settings.dokan_notice_shown)
                 }
+                "phone_update_noted" => {
+                    settings.phone_update_noted = value.parse().unwrap_or_default()
+                }
                 _ => {}
             }
         }
@@ -103,7 +109,7 @@ impl Settings {
             LinkChoice::Wifi => "wifi",
         };
         format!(
-            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\nphone_update_noted={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
@@ -111,6 +117,7 @@ impl Settings {
             self.use_webdav,
             self.log,
             self.dokan_notice_shown,
+            self.phone_update_noted,
         )
     }
 }
@@ -164,6 +171,7 @@ mod tests {
                 use_webdav: true,
                 log: false,
                 dokan_notice_shown: true,
+                phone_update_noted: 2,
             },
         ] {
             assert_eq!(Settings::parse(&settings.to_text()), settings);

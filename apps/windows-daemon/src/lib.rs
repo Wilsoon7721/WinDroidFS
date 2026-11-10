@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod logging;
 pub mod pairing;
 pub mod phone;
+pub mod phone_versions;
 pub mod session;
 pub mod socket;
 pub mod tether;

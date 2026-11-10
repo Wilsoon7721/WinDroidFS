@@ -15,8 +15,8 @@ use crate::windroid::packet::Payload;
 use crate::windroid::{
     CreateRequest, DeleteRequest, DirectoryRequest, ErrorCode, FileInfo, FileReadRequest,
     FlushRequest, Goodbye, OperationResponse, Packet, PairRequest, PairResponse, Ping, Pong,
-    RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UsbSpeed, VolumeInfoRequest,
-    WriteRequest,
+    RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UpdateNotice, UsbSpeed,
+    VolumeInfoRequest, WriteRequest,
 };
 
 /// How long to wait for the phone to answer a request
@@ -354,6 +354,16 @@ impl PhoneClient {
         Ok(resp)
     }
 
+    /// Tell the phone its app needs updating, so it shows its "Outdated version" screen. Phone apps that predate this
+    /// answer with an empty reply, which is fine: they can't show the screen, and the PC says so instead.
+    pub fn update_notice(&self, required: bool, latest_version: &str) -> Result<(), PhoneError> {
+        self.operation(Payload::UpdateNotice(UpdateNotice {
+            required,
+            latest_version: latest_version.to_string(),
+        }))
+        .map(|_| ())
+    }
+
     /// Have the phone close and sync a file it has been writing.
     pub fn flush(&self, path: &str) -> Result<(), PhoneError> {
         self.operation(Payload::FlushRequest(FlushRequest {
@@ -612,6 +622,7 @@ fn describe(payload: &Payload) -> String {
         Payload::FlushRequest(r) => format!("sync of {}", r.path),
         Payload::VolumeRequest(_) => "free-space check".into(),
         Payload::Goodbye(_) => "goodbye".into(),
+        Payload::UpdateNotice(_) => "update notice".into(),
         _ => "request".into(),
     }
 }

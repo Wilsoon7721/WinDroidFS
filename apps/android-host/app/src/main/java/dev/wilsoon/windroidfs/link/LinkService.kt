@@ -27,11 +27,13 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.PackageInfoCompat
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import dev.wilsoon.windroidfs.MainActivity
 import dev.wilsoon.windroidfs.R
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Goodbye
+import dev.wilsoon.windroidfs.protocol.WinDroidProto.OperationResponse
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.Packet
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.PairResponse
 import dev.wilsoon.windroidfs.protocol.WinDroidProto.UsbSpeed
@@ -90,7 +92,29 @@ object LinkState {
     /** Disconnect was pressed: don't link again until the cable is replugged or tethering toggled. */
     @Volatile var endedByUser = false
         internal set
+
+    private val mutableUpdateNeeded = MutableStateFlow<UpdateNeeded?>(null)
+    /** A PC said this app needs updating (it decides, from the version in every pong). Null after it's closed. */
+    val updateNeeded: StateFlow<UpdateNeeded?> = mutableUpdateNeeded.asStateFlow()
+
+    internal fun publishUpdateNeeded(update: UpdateNeeded) {
+        mutableUpdateNeeded.value = update
+    }
+
+    /** "Not now" or "Close" on the update screen. A PC says it again the next time it connects. */
+    fun dismissUpdate() {
+        mutableUpdateNeeded.value = null
+    }
 }
+
+/** What a PC said about this app's version, for the update screen. */
+data class UpdateNeeded(
+    /** The PC won't connect until it's updated. */
+    val required: Boolean,
+    /** The newest version the PC knows of, e.g. "1.2.0". */
+    val latestVersion: String,
+    val pcName: String,
+)
 
 /** Foreground service for USB link */
 class LinkService : Service() {
@@ -442,8 +466,11 @@ class LinkService : Service() {
                     }
                     if (fileServer == null) {
                         if (!claim(route)) return
+                        val app = packageManager.getPackageInfo(packageName, 0)
                         fileServer = FileServer(
                             deviceName = deviceName(),
+                            appVersionCode = PackageInfoCompat.getLongVersionCode(app).toInt(),
+                            appVersionName = app.versionName.orEmpty(),
                             exposedFolders = { AppSettings.exposedFolders(this) },
                             locked = { locked },
                             onFileChanged = { file ->
@@ -468,6 +495,8 @@ class LinkService : Service() {
                             .build()
                     } else if (request.hasPairRequest()) {
                         pair(route, request)
+                    } else if (request.hasUpdateNotice()) {
+                        updateNeeded(request)
                     } else try {
                         fileServer.handle(request)
                     } catch (e: Exception) {
@@ -647,6 +676,54 @@ class LinkService : Service() {
         false
     }
 
+    /**
+     * The PC found this app out of date. A service can't open a screen from the background, so post a notification
+     * that opens it; if the app is already open, it switches to the update screen at once (see [LinkState.updateNeeded]).
+     */
+    private fun updateNeeded(request: Packet): Packet {
+        val notice = request.updateNotice
+        val pc = hostName.ifEmpty { "Your PC" }
+        Log.i(TAG, "$pc says this app needs updating to ${notice.latestVersion} (required: ${notice.required})")
+        LinkState.publishUpdateNeeded(UpdateNeeded(notice.required, notice.latestVersion, hostName))
+
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(UPDATE_CHANNEL_ID, "App updates", NotificationManager.IMPORTANCE_DEFAULT)
+                    .apply { description = "When a PC needs a newer version of this app" },
+            )
+        }
+        val openApp = PendingIntent.getActivity(
+            this,
+            2,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, UPDATE_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val latest = notice.latestVersion.ifEmpty { "A newer version" }
+        manager.notify(
+            UPDATE_NOTIFICATION_ID,
+            builder
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(if (notice.required) "Update WinDroidFS to connect" else "WinDroidFS $latest is out")
+                .setContentText(
+                    if (notice.required) "$pc needs WinDroidFS $latest or later" else "Tap to see how to update",
+                )
+                .setContentIntent(openApp)
+                .setAutoCancel(true)
+                .build(),
+        )
+        return Packet.newBuilder()
+            .setRequestId(request.requestId)
+            .setOpResponse(OperationResponse.newBuilder().setSuccess(true))
+            .build()
+    }
+
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
@@ -735,6 +812,8 @@ class LinkService : Service() {
         private const val TAG = "WinDroid"
         private const val CHANNEL_ID = "link"
         private const val NOTIFICATION_ID = 1
+        private const val UPDATE_CHANNEL_ID = "updates"
+        private const val UPDATE_NOTIFICATION_ID = 2
 
         /** The PC pings every 3s when idle, 1 reply can take up to 15s */
         private const val PC_SILENCE_TIMEOUT_MS = 20_000L

@@ -346,6 +346,23 @@ fn supervise(shared: &Shared) {
             ),
             Event::WaitingForApp => shared.set_status(Status::WaitingForApp),
             Event::WaitingForUnlock => shared.set_status(Status::WaitingForUnlock),
+            Event::PhoneOutdated {
+                device_name,
+                version,
+                code,
+                latest,
+                required,
+                phone_shows_it,
+            } => note_phone_outdated(
+                shared,
+                &device_name,
+                &version,
+                code,
+                latest,
+                required,
+                phone_shows_it,
+            ),
+            Event::PhoneNewer => {}
             Event::Mounted {
                 drive,
                 device_name,
@@ -744,6 +761,51 @@ fn note_dokan_once(shared: &Shared, drive: char) {
         settings.save();
     }
     let text = dokan.notice(drive);
+    std::thread::spawn(move || {
+        message_box(
+            &text,
+            "WinDroidFS",
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    });
+}
+
+fn note_phone_outdated(
+    shared: &Shared,
+    device_name: &str,
+    version: &str,
+    code: u32,
+    latest: &str,
+    required: bool,
+    phone_shows_it: bool,
+) {
+    if !required {
+        let mut settings = lock(&shared.settings);
+        if settings.phone_update_noted == code {
+            return;
+        }
+        settings.phone_update_noted = code;
+        settings.save();
+        if phone_shows_it {
+            return;
+        }
+    }
+    let phone = if device_name.is_empty() {
+        "your phone"
+    } else {
+        device_name
+    };
+    let why = if required {
+        format!("This PC can't connect to it until it's updated to {latest}.")
+    } else {
+        format!(
+            "It has {version}; {latest} is out, with fixes and improvements. It still works meanwhile."
+        )
+    };
+    let text = format!(
+        "Update the WinDroidFS app on {phone}.\n\n{why}\n\nUpdate it where you installed it from: F-Droid, IzzyOnDroid \
+         or the GitHub releases page."
+    );
     std::thread::spawn(move || {
         message_box(
             &text,

@@ -16,6 +16,7 @@ use crate::global_drive;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
+use crate::phone_versions::{self, Verdict};
 use crate::windroid::Pong;
 use crate::{adb, tether, webdav, wifi, winfsp_fs};
 
@@ -98,6 +99,16 @@ pub enum Event {
     RestrictedFolder,
     /// The phone app is answering but waits for its owner's fingerprint before sharing anything.
     WaitingForUnlock,
+    /// The phone app is older than this PC app would like. If `required`, it doesn't mount (the session ends with [`Ended::Failed`])
+    PhoneOutdated {
+        device_name: String,
+        version: String,
+        code: u32,
+        latest: &'static str,
+        required: bool,
+        phone_shows_it: bool,
+    },
+    PhoneNewer,
     /// Mounted and serving.
     Mounted {
         drive: char,
@@ -491,6 +502,7 @@ fn answering(
     match wait_for_app(&phone, stop, on_event) {
         Some(pong) => {
             log::info!("🏓 Phone responded to Ping! The link is active.");
+            check_app_version(&phone, &pong.device_name, &pong, on_event)?;
             let device_name = pong.device_name;
             if route != Route::Wifi {
                 pair_for_wifi(&phone, &device_name);
@@ -507,6 +519,52 @@ fn answering(
         None if phone.closed_by_phone() => Err(Ended::ClosedByPhone),
         None => Err(Ended::PhoneLost),
     }
+}
+
+fn check_app_version(
+    phone: &PhoneClient,
+    device_name: &str,
+    pong: &Pong,
+    on_event: &dyn Fn(Event),
+) -> Result<(), Ended> {
+    let code = pong.app_version_code;
+    let version = phone_versions::name_of(code, &pong.app_version_name);
+    let (required, latest) = match phone_versions::judge(code) {
+        Verdict::Current => return Ok(()),
+        Verdict::Newer => {
+            log::info!(
+                "ℹ️  The phone's app ({version}) is newer than this PC app knows of: there may be an update for this PC."
+            );
+            on_event(Event::PhoneNewer);
+            return Ok(());
+        }
+        Verdict::Outdated { latest } => (false, latest),
+        Verdict::Unsupported { latest, .. } => (true, latest),
+    };
+
+    let phone_shows_it = code >= phone_versions::SHOWS_UPDATE_SCREEN;
+    if phone_shows_it && let Err(e) = phone.update_notice(required, latest.name) {
+        log::debug!("Couldn't show the phone its update screen: {e}");
+    }
+    on_event(Event::PhoneOutdated {
+        device_name: device_name.to_string(),
+        version: version.clone(),
+        code: code.max(1),
+        latest: latest.name,
+        required,
+        phone_shows_it,
+    });
+    if required {
+        return Err(failed(format!(
+            "The WinDroidFS app on {device_name} ({version}) is too old for this PC. Update it to {} or later.",
+            latest.name
+        )));
+    }
+    log::info!(
+        "⬆️  WinDroidFS {} is out for the phone ({device_name} has {version}).",
+        latest.name
+    );
+    Ok(())
 }
 
 /// Swap certificates over this USB link, so the phone can be reached over Wi-Fi later. Older phone apps can't, which is fine.

@@ -46,7 +46,18 @@ message Packet {
     PairReveal pair_reveal = 26;
     PairConfirm pair_confirm = 27;
     PairResult pair_result = 28;
+    UpdateNotice update_notice = 29;
   }
+}
+
+// The PC telling the phone its app needs updating. The PC decides, from the app's version code in Pong, and the phone
+// shows its "Outdated version" screen. Answered with an OperationResponse. Phone apps from before this ignore it.
+// Must never change meaning: it has to reach phone apps from any release.
+message UpdateNotice {
+  // The PC won't work with this app until it's updated. Otherwise it works, and updating is a suggestion.
+  bool required = 1;
+  // The newest phone app this PC knows of, e.g. "1.2.0", for the screen to name.
+  string latest_version = 2;
 }
 
 // Why a request failed. The PC maps these to Windows errors.
@@ -133,6 +144,10 @@ message Pong {
   bool locked = 3;
   // Only some top-level folders are shared, so the PC mustn't reach around the app (adb's Android/data).
   bool limited_folders = 4;
+  // The app's versionCode (1, 2, 3...), which is what the PC checks; 0 from apps before 1.1.0, which is 1.0.0.
+  // The name ("1.1.0") is only for showing.
+  uint32 app_version_code = 5;
+  string app_version_name = 6;
 }
 
 // File System Commands
