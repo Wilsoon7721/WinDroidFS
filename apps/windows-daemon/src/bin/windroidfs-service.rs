@@ -348,6 +348,7 @@ mod manage {
         ServiceType,
     };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    use windows_sys::Win32::Foundation::ERROR_SERVICE_EXISTS;
 
     use super::{SERVICE_DISPLAY, SERVICE_NAME, report_restore};
 
@@ -374,14 +375,25 @@ mod manage {
             account_password: None,
         };
 
-        let service = manager
-            .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
-            .map_err(|e| e.to_string())?;
+        let access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START;
+        let (service, verb) = match manager.create_service(&info, access) {
+            Ok(service) => (service, "Installed"),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_EXISTS as i32) =>
+            {
+                let service = manager
+                    .open_service(SERVICE_NAME, access)
+                    .map_err(|e| e.to_string())?;
+                service.change_config(&info).map_err(|e| e.to_string())?;
+                (service, "Updated")
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         let _ = service.set_description(
             "Switches Android USB drivers to WinUSB for WinDroidFS and restores them afterwards.",
         );
         service.start::<&str>(&[]).map_err(|e| e.to_string())?;
-        Ok(format!("Installed and started {SERVICE_DISPLAY}."))
+        Ok(format!("{verb} and started {SERVICE_DISPLAY}."))
     }
 
     pub fn uninstall() -> Result<String, String> {
