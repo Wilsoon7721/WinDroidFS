@@ -50,7 +50,12 @@ const FALLBACK_POLL: Duration = Duration::from_secs(30);
 /// How long to wait before checking the driver service again when it isn't running.
 const SERVICE_RETRY: Duration = Duration::from_secs(3);
 
-/// The `ICON` resource embedded by build.rs (assets/icon.rc).
+/// After a link ends, how long the phone may vanish without that counting as an unplug. Leaving Accessory Mode or a driver being put back re-enumerates the phone which can take up to 10 seconds
+const SETTLE: Duration = Duration::from_secs(20);
+
+/// How long to wait after tethering ends but USB tethering still on
+const TETHER_RETRY: Duration = Duration::from_secs(2);
+
 const ICON_RESOURCE: u16 = 1;
 
 /// WinFsp's FLOSS exception requires this notice and link in the user interface.
@@ -130,6 +135,8 @@ struct Shared {
     session_stop: Mutex<Stop>,
     /// Set with a stop that should reconnect straight away (a setting changed), rather than count as the user turning things off.
     restart: AtomicBool,
+    /// Set by Reconnect: try again now, even though nothing about the phone changed since the last link ended.
+    reconnect: AtomicBool,
     quit: AtomicBool,
     /// Wakes when a USB device comes or goes, or when told to look again.
     watch: UsbWatch,
@@ -210,6 +217,7 @@ fn main() {
         status_version: AtomicU64::new(1),
         session_stop: Mutex::new(Stop::new()),
         restart: AtomicBool::new(false),
+        reconnect: AtomicBool::new(false),
         quit: AtomicBool::new(false),
         watch: UsbWatch::new(),
         warned_speed: Mutex::new(None),
@@ -269,28 +277,45 @@ fn shutdown(shared: &Shared, supervisor: JoinHandle<()>) {
 
 /// Wait for a phone, connect, repeat, until told to quit.
 fn supervise(shared: &Shared) {
-    let mut wait_for_unplug = false;
+    let mut held_at: Option<session::Presence> = None;
+    let mut ended_at = Instant::now();
     let mut remounting = false;
 
     while !shared.quit.load(Ordering::SeqCst) {
         let settings = shared.settings();
         if !settings.enabled {
-            wait_for_unplug = false;
+            held_at = None;
             shared.set_status(Status::Off);
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
+        if shared.reconnect.swap(false, Ordering::SeqCst) {
+            held_at = None;
+        }
 
-        if !session::phone_present(settings.link) {
-            wait_for_unplug = false;
+        let presence = session::presence(settings.link);
+        // Straight after a link ended, the phone vanishing and reappearing on USB is re-enumeration, not a replug.
+        let settling = SETTLE.saturating_sub(ended_at.elapsed());
+        if let Some(held) = held_at.as_mut()
+            && !settling.is_zero()
+        {
+            held.adopt_usb(&presence);
+        }
+        if !presence.any() {
+            if held_at.is_some() && !settling.is_zero() {
+                shared.watch.wait(settling);
+                continue;
+            }
+            held_at = None;
             shared.set_status(Status::WaitingForPhone);
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
-        if wait_for_unplug {
+        if held_at.as_ref() == Some(&presence) {
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
+        held_at = None;
 
         if session::needs_service(settings.link) && !transport::service_available() {
             shared.set_status(Status::NoService);
@@ -340,29 +365,27 @@ fn supervise(shared: &Shared) {
             }
         };
 
-        match session::run(&options, &stop, &on_event) {
+        let ended = session::run(&options, &stop, &on_event);
+        if matches!(ended, Ended::PhoneLost | Ended::ClosedByPhone)
+            && session::presence(settings.link).tethered()
+        {
+            shared.watch.wait(TETHER_RETRY);
+            continue;
+        }
+        let message = match ended {
             Ended::Stopped => {
                 remounting = shared.restart.swap(false, Ordering::SeqCst);
+                continue;
             }
-            Ended::ClosedByPhone => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(
-                    "Disconnected from the phone. Unplug and replug it to reconnect.".into(),
-                ));
-            }
-            Ended::PhoneLost => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(
-                    "Disconnected. Unplug and replug the phone to reconnect.".into(),
-                ));
-            }
-            Ended::Failed(why) => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(format!(
-                    "{why} Unplug and replug the phone to try again."
-                )));
-            }
-        }
+            Ended::ClosedByPhone => "The phone disconnected.".to_string(),
+            Ended::PhoneLost => "Disconnected.".to_string(),
+            Ended::Failed(why) => why,
+        };
+        held_at = Some(presence);
+        ended_at = Instant::now();
+        shared.set_status(Status::Ended(format!(
+            "{message} Choose Reconnect, or replug the phone, to try again."
+        )));
     }
 }
 
@@ -381,6 +404,7 @@ struct Tray {
     icon: TrayIcon,
     status: MenuItem,
     open: MenuItem,
+    reconnect: MenuItem,
     enabled: CheckMenuItem,
     drives: Vec<(DriveChoice, CheckMenuItem)>,
     links: Vec<(LinkChoice, CheckMenuItem)>,
@@ -401,6 +425,7 @@ impl Tray {
 
         let status = MenuItem::new("", false, None);
         let open = MenuItem::new("Open drive", false, None);
+        let reconnect = MenuItem::new("Reconnect", false, None);
         let enabled =
             CheckMenuItem::new("Mount phones when plugged in", true, settings.enabled, None);
 
@@ -480,6 +505,7 @@ impl Tray {
         let items: &[&dyn IsMenuItem] = &[
             &status,
             &open,
+            &reconnect,
             &PredefinedMenuItem::separator(),
             &enabled,
             &link_menu,
@@ -504,6 +530,7 @@ impl Tray {
             icon,
             status,
             open,
+            reconnect,
             enabled,
             drives,
             links,
@@ -550,6 +577,9 @@ impl Tray {
             unsafe { PostQuitMessage(0) };
         } else if id == self.open.id() {
             open_drive(shared);
+        } else if id == self.reconnect.id() {
+            shared.reconnect.store(true, Ordering::SeqCst);
+            shared.watch.wake();
         } else if id == self.pair.id() {
             std::thread::spawn(pair_over_wifi);
         } else if id == self.forget.id() {
@@ -668,6 +698,8 @@ impl Tray {
                 self.open.set_enabled(false);
             }
         }
+        self.reconnect
+            .set_enabled(matches!(status, Status::Ended(_)));
         self.enabled.set_checked(shared.settings().enabled);
     }
 }

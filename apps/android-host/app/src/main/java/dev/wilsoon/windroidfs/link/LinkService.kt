@@ -160,9 +160,23 @@ class LinkService : Service() {
             ACTION_WIFI -> offerWifi()
             else -> intent?.accessoryExtra()?.let(::offerAccessory)
         }
-        if (routes.isEmpty()) stopSelf()
+        stopIfIdle()
         return START_NOT_STICKY
     }
+
+    /**
+     * Stop once there's nothing to wait on. While the cable is plugged in there still might be: tethering, Accessory Mode
+     * or USB debugging can start at any moment, typically while the user is in Settings switching to one. An app in the
+     * background can't start this service again to listen for them, so it has to still be running then.
+     */
+    private fun stopIfIdle() {
+        if (routes.isEmpty() && !(running && cablePlugged())) stopSelf()
+    }
+
+    /** Whether a USB cable connects the phone to something, read from the system's sticky USB_STATE broadcast. */
+    private fun cablePlugged(): Boolean =
+        ContextCompat.registerReceiver(this, null, IntentFilter(ACTION_USB_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+            ?.getBooleanExtra("connected", false) == true
 
     override fun onDestroy() {
         running = false
@@ -344,8 +358,8 @@ class LinkService : Service() {
         }
         if (claimed.get() && route == transport) {
             mainHandler.post(::linkEnded)
-        } else if (!claimed.get() && routes.isEmpty()) {
-            mainHandler.post { stopSelf() }
+        } else if (!claimed.get()) {
+            mainHandler.post(::stopIfIdle)
         }
     }
 
@@ -367,7 +381,7 @@ class LinkService : Service() {
         lastNotifiedHost = null
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(null))
         offerAvailableRoutes()
-        if (routes.isEmpty()) stopSelf()
+        stopIfIdle()
     }
 
     /** Offering a route that's already offered does nothing. */
@@ -554,6 +568,7 @@ class LinkService : Service() {
             // Routes that turned up since, such as Wi-Fi once a PC is paired or tethering switched on. Then, if there's
             // still nothing and the cable's been unplugged, nothing more can turn up.
             mainHandler.post(::offerAvailableRoutes)
+            mainHandler.post(::stopIfIdle)
 
             LinkState.publish(
                 LinkStatus(
@@ -725,6 +740,8 @@ class LinkService : Service() {
         private const val PC_SILENCE_TIMEOUT_MS = 20_000L
         /** How long to wait for a PC request to carry the goodbye before closing anyway. */
         private const val GOODBYE_GRACE_MS = 5_000L
+        /** The system's sticky broadcast of the USB connection state. Hidden from the SDK, but stable since Android 4. */
+        private const val ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE"
         private const val ACTION_STOP = "dev.wilsoon.windroidfs.action.DISCONNECT"
         private const val ACTION_TETHER = "dev.wilsoon.windroidfs.action.TETHER"
         private const val ACTION_UNLOCK = "dev.wilsoon.windroidfs.action.UNLOCK"

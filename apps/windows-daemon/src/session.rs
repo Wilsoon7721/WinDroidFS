@@ -177,33 +177,82 @@ pub fn speed_advice(speed: UsbSpeed) -> Option<String> {
     ))
 }
 
-/// Whether a phone is plugged in that `link` can reach: in its normal identity, in Accessory Mode, or sharing its connection.
-pub fn phone_present(link: LinkChoice) -> bool {
-    let tethered = tether::phone_address().is_some();
-    match link {
-        LinkChoice::Tethering => return tethered,
-        LinkChoice::Adb => return adb::phone().is_some(),
-        LinkChoice::Wifi => return wifi::reachable(),
-        LinkChoice::Auto if tethered => return true,
-        _ => {}
-    }
-    usb_phone_present() || (link == LinkChoice::Auto && wifi::reachable())
+/// What `link` can see of the phone right now
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Presence {
+    link: LinkChoice,
+    /// Whether an Android phone is on USB at ALL (ignores accessory vs regular USB)
+    usb: bool,
+    tether: Option<SocketAddr>,
+    adb: bool,
+    wifi: bool,
 }
 
-/// An Android phone on USB, in its normal identity or Accessory Mode.
-fn usb_phone_present() -> bool {
+impl Presence {
+    /// Whether there's a phone `link` can reach.
+    pub fn any(&self) -> bool {
+        match self.link {
+            LinkChoice::Tethering => self.tether.is_some(),
+            LinkChoice::Adb => self.adb,
+            LinkChoice::Wifi => self.wifi,
+            LinkChoice::DirectUsb => self.usb,
+            LinkChoice::Auto => self.tether.is_some() || self.usb || self.wifi,
+        }
+    }
+
+    /// Whether `link` would use tethering, which is there now. Waiting on it is only a TCP connection attempt a second on a private link, so unlike Accessory Mode there's no harm in going straight back to waiting for the app.
+    pub fn tethered(&self) -> bool {
+        self.tether.is_some() && matches!(self.link, LinkChoice::Auto | LinkChoice::Tethering)
+    }
+
+    pub fn adopt_usb(&mut self, now: &Presence) {
+        self.usb = now.usb;
+    }
+}
+
+/// Look for a phone that `link` can reach: plugged in (normal identity or Accessory Mode), sharing its connection, through adb, or on Wi-Fi. The slow checks (adb, Wi-Fi) only run for the links that use them
+pub fn presence(link: LinkChoice) -> Presence {
+    let tether = tether::phone_address();
+    let usb = !usb_phones().is_empty();
+    let adb = link == LinkChoice::Adb && adb::phone().is_some();
+    let wifi = match link {
+        LinkChoice::Wifi => wifi::reachable(),
+        LinkChoice::Auto => tether.is_none() && !usb && wifi::reachable(),
+        _ => false,
+    };
+    Presence {
+        link,
+        usb,
+        tether,
+        adb,
+        wifi,
+    }
+}
+
+/// Whether a phone is plugged in that `link` can reach: in its normal identity, in Accessory Mode, or sharing its connection.
+pub fn phone_present(link: LinkChoice) -> bool {
+    presence(link).any()
+}
+
+/// Android phones on USB, in their normal identity or Accessory Mode, as sorted `(vid, pid)` pairs.
+fn usb_phones() -> Vec<(u16, u16)> {
     let Ok(context) = Context::new() else {
-        return false;
+        return Vec::new();
     };
     let Ok(devices) = context.devices() else {
-        return false;
+        return Vec::new();
     };
-    devices.iter().any(|device| {
-        device.device_descriptor().is_ok_and(|desc| {
+    let mut phones: Vec<(u16, u16)> = devices
+        .iter()
+        .filter_map(|device| {
+            let desc = device.device_descriptor().ok()?;
             let (vid, pid) = (desc.vendor_id(), desc.product_id());
-            is_normal_android_identity(vid, pid) || is_aoa_identity(vid, pid)
+            (is_normal_android_identity(vid, pid) || is_aoa_identity(vid, pid))
+                .then_some((vid, pid))
         })
-    })
+        .collect();
+    phones.sort_unstable();
+    phones
 }
 
 /// Connect to the phone, mount it, and stay mounted until `stop` is requested or the phone goes away.
@@ -304,10 +353,25 @@ fn connect_phone(
     }
 
     // Before USB: the AOA handshake would take the phone out of tethering.
-    let tethered = match link {
+    let mut tethered = match link {
         LinkChoice::DirectUsb | LinkChoice::Adb | LinkChoice::Wifi => None,
         LinkChoice::Auto | LinkChoice::Tethering => tether::phone_address(),
     };
+    if link == LinkChoice::Auto && tethered.is_none() && phone_is_tethering() {
+        log::info!(
+            "The phone is starting USB tethering. Waiting for Windows to set up its network..."
+        );
+        tethered = wait_for_tether_network(stop);
+        if tethered.is_none() {
+            return Ok(Err(if stop.requested() {
+                Ended::Stopped
+            } else {
+                failed(
+                    "The phone is sharing its connection over USB, but Windows hasn't set up a network for it.",
+                )
+            }));
+        }
+    }
     if link == LinkChoice::Tethering && tethered.is_none() {
         return Ok(Err(failed(
             "USB tethering isn't on. Turn it on in the phone's Hotspot & Tethering settings.",
@@ -349,7 +413,7 @@ fn connect_phone(
         }
     }
 
-    if link == LinkChoice::Auto && !usb_phone_present() && wifi::reachable() {
+    if link == LinkChoice::Auto && usb_phones().is_empty() && wifi::reachable() {
         return Ok(connect_wifi(stop, on_event));
     }
 
@@ -522,9 +586,58 @@ fn connect_adb(
     }
 }
 
-/// Connect to the phone app over the tethering link, waiting for it to be opened. `None` if stopped, or if tethering ends first.
+/// How long the tethering network may take to appear once the phone's USB says it's tethering, and how long it may vanish before the link is gone
+const TETHER_NETWORK_WAIT: Duration = Duration::from_secs(20);
+const TETHER_BLINK: Duration = Duration::from_secs(5);
+
+/// Whether an Android phone on USB is in its tethering configuration: an RNDIS or CDC NCM/ECM network interface
+fn phone_is_tethering() -> bool {
+    let Ok(context) = Context::new() else {
+        return false;
+    };
+    let Ok(devices) = context.devices() else {
+        return false;
+    };
+    devices.iter().any(|device| {
+        device
+            .device_descriptor()
+            .is_ok_and(|desc| is_normal_android_identity(desc.vendor_id(), desc.product_id()))
+            && device.active_config_descriptor().is_ok_and(|config| {
+                config.interfaces().any(|interface| {
+                    interface.descriptors().any(|d| {
+                        is_network_interface(d.class_code(), d.sub_class_code(), d.protocol_code())
+                    })
+                })
+            })
+    })
+}
+
+/// RNDIS, CDC NCM or CDC ECM
+fn is_network_interface(class: u8, subclass: u8, protocol: u8) -> bool {
+    matches!(
+        (class, subclass, protocol),
+        (0xE0, 0x01, 0x03) | (0xEF, 0x04, 0x01) | (0x02, 0x0D, _) | (0x02, 0x06, _)
+    )
+}
+
+/// The phone's tethering address once Windows has set up the network, while the phone stays in tethering mode
+fn wait_for_tether_network(stop: &Stop) -> Option<SocketAddr> {
+    let deadline = Instant::now() + TETHER_NETWORK_WAIT;
+    while Instant::now() < deadline && phone_is_tethering() {
+        if let Some(addr) = tether::phone_address() {
+            return Some(addr);
+        }
+        if stop.sleep(Duration::from_millis(500)) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Connect to the phone app over the tethering link, waiting for it to be opened - `None` if stopped or if tethering ends first.
 fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<TcpStream> {
     let mut asked = false;
+    let mut gone_since: Option<Instant> = None;
     loop {
         match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
             Ok(stream) => return Some(stream),
@@ -536,7 +649,12 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
             }
             Err(_) => {}
         }
-        if stop.sleep(Duration::from_secs(1)) || tether::phone_address() != Some(addr) {
+        if stop.sleep(Duration::from_secs(1)) {
+            return None;
+        }
+        if tether::phone_address() == Some(addr) {
+            gone_since = None;
+        } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= TETHER_BLINK {
             return None;
         }
     }
@@ -998,6 +1116,71 @@ fn find_aoa_endpoints(device: &Device<Context>) -> rusb::Result<Option<(u8, u8, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seen(link: LinkChoice, usb: bool, tether: bool) -> Presence {
+        Presence {
+            link,
+            usb,
+            tether: tether.then(|| "192.168.42.129:9999".parse().unwrap()),
+            ..Presence::default()
+        }
+    }
+
+    #[test]
+    fn each_link_only_counts_what_it_can_use() {
+        let accessory_only = seen(LinkChoice::Auto, true, false);
+        assert!(accessory_only.any());
+        assert!(
+            !Presence {
+                link: LinkChoice::Tethering,
+                ..accessory_only.clone()
+            }
+            .any()
+        );
+        assert!(
+            !Presence {
+                link: LinkChoice::Adb,
+                ..accessory_only.clone()
+            }
+            .any()
+        );
+        assert!(
+            Presence {
+                link: LinkChoice::DirectUsb,
+                ..accessory_only
+            }
+            .any()
+        );
+        assert!(seen(LinkChoice::Tethering, true, true).any());
+        assert!(!seen(LinkChoice::Auto, false, false).any());
+    }
+
+    #[test]
+    fn turning_tethering_on_or_off_counts_as_a_change() {
+        let ended = seen(LinkChoice::Auto, true, false);
+        let tethering = seen(LinkChoice::Auto, true, true);
+        assert_ne!(ended, tethering);
+        assert_ne!(tethering, ended);
+        assert_eq!(ended, seen(LinkChoice::Auto, true, false));
+        assert_ne!(
+            ended,
+            Presence {
+                link: LinkChoice::DirectUsb,
+                ..ended.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn recognises_tethering_interfaces() {
+        assert!(is_network_interface(0xE0, 0x01, 0x03)); // RNDIS, as Android describes it
+        assert!(is_network_interface(0xEF, 0x04, 0x01)); // RNDIS, as Windows' class driver matches it
+        assert!(is_network_interface(0x02, 0x0D, 0x00)); // CDC NCM
+        assert!(is_network_interface(0x02, 0x06, 0x00)); // CDC ECM
+        assert!(!is_network_interface(0x06, 0x01, 0x01)); // MTP
+        assert!(!is_network_interface(0xFF, 0x42, 0x01)); // adb
+        assert!(!is_network_interface(0xFF, 0xFF, 0x00)); // Accessory Mode
+    }
 
     #[test]
     fn advises_only_below_usb_3() {
