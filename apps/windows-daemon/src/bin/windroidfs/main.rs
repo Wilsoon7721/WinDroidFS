@@ -19,8 +19,9 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
-    MSG, MessageBoxW, PostQuitMessage, PostThreadMessageW, TranslateMessage, WM_APP,
+    DispatchMessageW, GetMessageW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING,
+    MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MSG, MessageBoxW, PostQuitMessage,
+    PostThreadMessageW, TranslateMessage, WM_APP,
 };
 use windows_sys::core::BOOL;
 use windroidfs::ipc::transport;
@@ -187,6 +188,18 @@ fn main() {
     }
     logging::set_file_logging(settings.log);
     log::info!("WinDroidFS {} started.", env!("CARGO_PKG_VERSION"));
+
+    if std::env::args().any(|arg| arg == "--installed") {
+        std::thread::spawn(|| {
+            message_box(
+                "WinDroidFS is running in the system tray, by the clock. If you can't see its icon, \
+                 it may be under the ^ arrow.\n\nConnect your phone to open its drive, or right-click \
+                 the icon for options.",
+                "WinDroidFS",
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        });
+    }
 
     UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
     unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) };
