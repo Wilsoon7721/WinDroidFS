@@ -1,22 +1,4 @@
-//! WinDroidFS privileged driver service.
-//!
-//! This is the ONLY part of WinDroidFS that changes USB drivers. It runs as SYSTEM, installed
-//! once by the installer, and the user-level daemon asks it to act over a locked-down named pipe
-//! (see `windroidfs::ipc`). Keeping driver changes here means the everyday daemon needs no
-//! elevation and the user sees no per-session UAC prompt.
-//!
-//! Policy enforced here (the reason this is safe to expose over a pipe):
-//!   - Only Android VID:PIDs are ever touched. A BeginSwap must be a normal-mode Android
-//!     identity; an EnsureWinusb must be an accessory identity. Anything else is refused.
-//!   - It only switches between driver packages already installed. It never creates or signs
-//!     packages (the driver module has no such capability), and never touches non-USB devices.
-//!
-//! Usage:
-//!   windroidfs-service run        Run the pipe loop in the foreground (dev / debugging).
-//!   windroidfs-service install    Register the Windows service (needs admin).
-//!   windroidfs-service uninstall  Restore drivers, then remove the service (needs admin).
-//!   windroidfs-service start|stop Start/stop the installed service (needs admin).
-//!   windroidfs-service            (no args) Entry point used by the service manager.
+//! WinDroidFS privileged driver service
 
 use std::time::Duration;
 

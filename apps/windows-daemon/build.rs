@@ -27,11 +27,7 @@ fn main() {
     }
 }
 
-/// Compile assets/icon.rc and hand the result to the linker, so both .exe files carry the
-/// WinDroidFS icon in Explorer, the taskbar and Alt+Tab.
-///
-/// This uses rc.exe from the Windows SDK rather than a crate, so it adds no dependency. If the
-/// SDK isn't installed the build still succeeds — you just get the default blank exe icon.
+/// Compile assets/icon.rc and hand the result to the linker, so both .exe files carry the WinDroidFS icon in Explorer, the taskbar and Alt+Tab
 fn embed_icon(out_dir: &Path) {
     println!("cargo:rerun-if-changed=assets/icon.rc");
     println!("cargo:rerun-if-changed=assets/windroidfs.ico");

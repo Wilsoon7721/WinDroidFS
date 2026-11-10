@@ -551,7 +551,8 @@ class LinkService : Service() {
                 Log.i(TAG, "Wi-Fi changed")
                 routes[LinkTransport.WIFI]?.let(::quietlyClose)
             }
-            // Routes that turned up since, such as Wi-Fi once a PC is paired
+            // Routes that turned up since, such as Wi-Fi once a PC is paired or tethering switched on. Then, if there's
+            // still nothing and the cable's been unplugged, nothing more can turn up.
             mainHandler.post(::offerAvailableRoutes)
 
             LinkState.publish(

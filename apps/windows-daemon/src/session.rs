@@ -542,7 +542,7 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
     }
 }
 
-/// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
+/// Ping the phone until its app answers, returning the phone's name - `None` if stopped or if the phone is unplugged first
 fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<Pong> {
     let mut asked = false;
     let mut locked = false;
@@ -659,7 +659,7 @@ fn wait_while_mounted(phone: &PhoneClient, stop: &Stop, tick: impl Fn()) -> Ende
     Ended::PhoneLost
 }
 
-/// The fallback mount: a local WebDAV server mapped to a drive letter with `net use`.
+/// The fallback mount: a local WebDAV server mapped to a drive letter with `net use`
 fn mount_webdav(
     phone: PhoneClient,
     device_name: &str,
@@ -674,7 +674,6 @@ fn mount_webdav(
     let target = format!("{letter}:");
     let addr = SocketAddr::from(WEBDAV_ADDR);
     let url = format!("http://{addr}");
-    // Kept alive until this function returns: dropping it stops the server.
     let rt = tokio::runtime::Runtime::new().expect("failed to start the async runtime");
 
     log::info!("🌐 Starting WebDAV server on {url}...");
@@ -717,13 +716,13 @@ fn mount_webdav(
     ended
 }
 
-/// The phone's identity on the bus.
+/// The phone's identity on the bus
 enum Found {
     Normal(u16, u16),
     Accessory,
 }
 
-/// Look for the phone until `timeout`. `None` if it never shows up, or if stopped.
+/// Look for the phone until `timeout` - `None` if it never shows up or if stopped
 fn find_phone(stop: &Stop, timeout: Duration) -> rusb::Result<Option<Found>> {
     let deadline = Instant::now() + timeout;
     loop {

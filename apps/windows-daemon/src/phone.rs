@@ -590,13 +590,11 @@ fn exchange(
     scratch: &mut [u8],
     timeout: Duration,
 ) -> Result<Payload, PhoneError> {
-    // Header and payload go out in one write, so they arrive as one transfer
     let framed = frame::encode(&request.encode_to_vec());
     transport.send(&framed, WRITE_TIMEOUT.min(timeout))?;
 
     let deadline = Instant::now() + timeout;
     loop {
-        // Use whatever is already buffered. An earlier read may have brought in this reply, or a stale one that needs clearing.
         loop {
             match frame::take_frame(inbox) {
                 Frame::Complete(bytes) => match Packet::decode(bytes.as_slice()) {
@@ -632,8 +630,6 @@ fn exchange(
             )));
         }
 
-        // A timeout here just means nothing more has arrived yet: keep what's buffered and go round again until the deadline.
-        // Throwing partial data away is what used to leave the 2 sides permanently out of step.
         let n = transport.receive(scratch, deadline - now)?;
         inbox.extend_from_slice(&scratch[..n]);
     }
