@@ -10,6 +10,7 @@ pub mod logging;
 pub mod pairing;
 pub mod phone;
 pub mod session;
+pub mod socket;
 pub mod tether;
 pub mod usb_watch;
 pub mod webdav;
