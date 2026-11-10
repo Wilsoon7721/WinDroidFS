@@ -20,8 +20,6 @@ pub struct Settings {
     pub use_webdav: bool,
     /// Keep a log file (see `windroidfs::logging`).
     pub log: bool,
-    /// The notice about Dokan breaking elevated launches from the phone has been shown (see `windroidfs::dokan`).
-    pub dokan_notice_shown: bool,
     /// Look for a newer PC app on GitHub now and then (see `updates`). Checking from the menu works either way.
     pub check_for_updates: bool,
     /// The newest PC app version an automatic check already offered, so it's offered once, not at every start.
@@ -41,7 +39,6 @@ impl Default for Settings {
             hide_dotfiles: true,
             use_webdav: false,
             log: true,
-            dokan_notice_shown: false,
             check_for_updates: true,
             update_offered: String::new(),
             phone_update_noted: 0,
@@ -90,9 +87,6 @@ impl Settings {
                 "hide_dotfiles" => settings.hide_dotfiles = flag(settings.hide_dotfiles),
                 "use_webdav" => settings.use_webdav = flag(settings.use_webdav),
                 "log" => settings.log = flag(settings.log),
-                "dokan_notice_shown" => {
-                    settings.dokan_notice_shown = flag(settings.dokan_notice_shown)
-                }
                 "check_for_updates" => {
                     settings.check_for_updates = flag(settings.check_for_updates)
                 }
@@ -119,14 +113,13 @@ impl Settings {
             LinkChoice::Wifi => "wifi",
         };
         format!(
-            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ndokan_notice_shown={}\ncheck_for_updates={}\nupdate_offered={}\nphone_update_noted={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ncheck_for_updates={}\nupdate_offered={}\nphone_update_noted={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
             self.hide_dotfiles,
             self.use_webdav,
             self.log,
-            self.dokan_notice_shown,
             self.check_for_updates,
             self.update_offered,
             self.phone_update_noted,
@@ -182,7 +175,6 @@ mod tests {
                 hide_dotfiles: false,
                 use_webdav: true,
                 log: false,
-                dokan_notice_shown: true,
                 check_for_updates: false,
                 update_offered: "1.2.0".into(),
                 phone_update_noted: 2,

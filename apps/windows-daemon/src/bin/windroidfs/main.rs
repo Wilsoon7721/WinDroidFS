@@ -384,7 +384,6 @@ fn supervise(shared: &Shared) {
                     usb_speed,
                 });
                 warn_if_slow(shared, usb_speed);
-                note_dokan_once(shared, drive);
                 if open_when_mounted {
                     open_drive(shared);
                 }
@@ -756,37 +755,6 @@ fn warn_if_slow(shared: &Shared, speed: UsbSpeed) {
         &format!("USB Type: {}", session::speed_name(speed)),
         &advice,
     );
-}
-
-/// The first time a drive mounts on a PC with Dokan - inform users about the clash with network drives (see `windroidfs::dokan`)
-fn note_dokan_once(shared: &Shared, drive: char) {
-    if shared.settings().dokan_notice_shown {
-        return;
-    }
-    let Some(dokan) = windroidfs::dokan::find() else {
-        return;
-    };
-    log::warn!(
-        "⚠️  Dokan is installed{}: Explorer can't start installers from {drive}: as administrator.",
-        match (dokan.installed_by.is_empty(), dokan.sure) {
-            (true, _) => String::new(),
-            (false, true) => format!(" (by {})", dokan.installed_by.join(" or ")),
-            (false, false) => format!(" (most likely by {})", dokan.installed_by.join(" or ")),
-        }
-    );
-    {
-        let mut settings = lock(&shared.settings);
-        settings.dokan_notice_shown = true;
-        settings.save();
-    }
-    let text = dokan.notice(drive);
-    std::thread::spawn(move || {
-        message_box(
-            &text,
-            "WinDroidFS",
-            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-        )
-    });
 }
 
 fn note_phone_outdated(
