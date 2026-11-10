@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest something new WinDroidFS can't do yet
+labels: ["feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: The task or situation, and what gets in the way today.
+      placeholder: I'd like to open my phone's SD card from File Explorer too, but only internal storage shows up.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could it work?
+      description: How you picture it, on the PC, the phone, or both.
+    validations:
+      required: true
+  - type: dropdown
+    id: side
+    attributes:
+      label: Which side is it for?
+      options:
+        - PC app
+        - Phone app
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do instead today?
+      description: Workarounds or other apps you use for this, if any.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Screenshots, links, or examples from other apps.

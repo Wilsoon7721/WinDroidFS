@@ -1,0 +1,3 @@
+• Stays ready while the USB cable is plugged in, so your PC can connect without opening the app
+• Tells you when your PC needs a newer version of this app, and where to get it
+• With WinDroidFS 1.1.0 for Windows: run installers straight from the phone, switch between Direct USB and USB tethering without unplugging, and no more dropped connections during big copies over Wi-Fi or tethering

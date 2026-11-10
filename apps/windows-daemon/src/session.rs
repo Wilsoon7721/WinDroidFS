@@ -12,9 +12,11 @@ use rusb::{
 
 use crate::android::{aoa_identities, is_aoa_identity, is_normal_android_identity};
 use crate::driver;
+use crate::global_drive;
 use crate::ipc::transport::send;
 use crate::ipc::{Request, Response};
 use crate::phone::PhoneClient;
+use crate::phone_versions::{self, Verdict};
 use crate::windroid::Pong;
 use crate::{adb, tether, webdav, wifi, winfsp_fs};
 
@@ -97,6 +99,16 @@ pub enum Event {
     RestrictedFolder,
     /// The phone app is answering but waits for its owner's fingerprint before sharing anything.
     WaitingForUnlock,
+    /// The phone app is older than this PC app would like. If `required`, it doesn't mount (the session ends with [`Ended::Failed`])
+    PhoneOutdated {
+        device_name: String,
+        version: String,
+        code: u32,
+        latest: &'static str,
+        required: bool,
+        phone_shows_it: bool,
+    },
+    PhoneNewer,
     /// Mounted and serving.
     Mounted {
         drive: char,
@@ -177,33 +189,82 @@ pub fn speed_advice(speed: UsbSpeed) -> Option<String> {
     ))
 }
 
-/// Whether a phone is plugged in that `link` can reach: in its normal identity, in Accessory Mode, or sharing its connection.
-pub fn phone_present(link: LinkChoice) -> bool {
-    let tethered = tether::phone_address().is_some();
-    match link {
-        LinkChoice::Tethering => return tethered,
-        LinkChoice::Adb => return adb::phone().is_some(),
-        LinkChoice::Wifi => return wifi::reachable(),
-        LinkChoice::Auto if tethered => return true,
-        _ => {}
-    }
-    usb_phone_present() || (link == LinkChoice::Auto && wifi::reachable())
+/// What `link` can see of the phone right now
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Presence {
+    link: LinkChoice,
+    /// Whether an Android phone is on USB at ALL (ignores accessory vs regular USB)
+    usb: bool,
+    tether: Option<SocketAddr>,
+    adb: bool,
+    wifi: bool,
 }
 
-/// An Android phone on USB, in its normal identity or Accessory Mode.
-fn usb_phone_present() -> bool {
+impl Presence {
+    /// Whether there's a phone `link` can reach.
+    pub fn any(&self) -> bool {
+        match self.link {
+            LinkChoice::Tethering => self.tether.is_some(),
+            LinkChoice::Adb => self.adb,
+            LinkChoice::Wifi => self.wifi,
+            LinkChoice::DirectUsb => self.usb,
+            LinkChoice::Auto => self.tether.is_some() || self.usb || self.wifi,
+        }
+    }
+
+    /// Whether `link` would use tethering, which is there now. Waiting on it is only a TCP connection attempt a second on a private link, so unlike Accessory Mode there's no harm in going straight back to waiting for the app.
+    pub fn tethered(&self) -> bool {
+        self.tether.is_some() && matches!(self.link, LinkChoice::Auto | LinkChoice::Tethering)
+    }
+
+    pub fn adopt_usb(&mut self, now: &Presence) {
+        self.usb = now.usb;
+    }
+}
+
+/// Look for a phone that `link` can reach: plugged in (normal identity or Accessory Mode), sharing its connection, through adb, or on Wi-Fi. The slow checks (adb, Wi-Fi) only run for the links that use them
+pub fn presence(link: LinkChoice) -> Presence {
+    let tether = tether::phone_address();
+    let usb = !usb_phones().is_empty();
+    let adb = link == LinkChoice::Adb && adb::phone().is_some();
+    let wifi = match link {
+        LinkChoice::Wifi => wifi::reachable(),
+        LinkChoice::Auto => tether.is_none() && !usb && wifi::reachable(),
+        _ => false,
+    };
+    Presence {
+        link,
+        usb,
+        tether,
+        adb,
+        wifi,
+    }
+}
+
+/// Whether a phone is plugged in that `link` can reach: in its normal identity, in Accessory Mode, or sharing its connection.
+pub fn phone_present(link: LinkChoice) -> bool {
+    presence(link).any()
+}
+
+/// Android phones on USB, in their normal identity or Accessory Mode, as sorted `(vid, pid)` pairs.
+fn usb_phones() -> Vec<(u16, u16)> {
     let Ok(context) = Context::new() else {
-        return false;
+        return Vec::new();
     };
     let Ok(devices) = context.devices() else {
-        return false;
+        return Vec::new();
     };
-    devices.iter().any(|device| {
-        device.device_descriptor().is_ok_and(|desc| {
+    let mut phones: Vec<(u16, u16)> = devices
+        .iter()
+        .filter_map(|device| {
+            let desc = device.device_descriptor().ok()?;
             let (vid, pid) = (desc.vendor_id(), desc.product_id());
-            is_normal_android_identity(vid, pid) || is_aoa_identity(vid, pid)
+            (is_normal_android_identity(vid, pid) || is_aoa_identity(vid, pid))
+                .then_some((vid, pid))
         })
-    })
+        .collect();
+    phones.sort_unstable();
+    phones
 }
 
 /// Connect to the phone, mount it, and stay mounted until `stop` is requested or the phone goes away.
@@ -304,10 +365,25 @@ fn connect_phone(
     }
 
     // Before USB: the AOA handshake would take the phone out of tethering.
-    let tethered = match link {
+    let mut tethered = match link {
         LinkChoice::DirectUsb | LinkChoice::Adb | LinkChoice::Wifi => None,
         LinkChoice::Auto | LinkChoice::Tethering => tether::phone_address(),
     };
+    if link == LinkChoice::Auto && tethered.is_none() && phone_is_tethering() {
+        log::info!(
+            "The phone is starting USB tethering. Waiting for Windows to set up its network..."
+        );
+        tethered = wait_for_tether_network(stop);
+        if tethered.is_none() {
+            return Ok(Err(if stop.requested() {
+                Ended::Stopped
+            } else {
+                failed(
+                    "The phone is sharing its connection over USB, but Windows hasn't set up a network for it.",
+                )
+            }));
+        }
+    }
     if link == LinkChoice::Tethering && tethered.is_none() {
         return Ok(Err(failed(
             "USB tethering isn't on. Turn it on in the phone's Hotspot & Tethering settings.",
@@ -349,7 +425,7 @@ fn connect_phone(
         }
     }
 
-    if link == LinkChoice::Auto && !usb_phone_present() && wifi::reachable() {
+    if link == LinkChoice::Auto && usb_phones().is_empty() && wifi::reachable() {
         return Ok(connect_wifi(stop, on_event));
     }
 
@@ -426,6 +502,7 @@ fn answering(
     match wait_for_app(&phone, stop, on_event) {
         Some(pong) => {
             log::info!("🏓 Phone responded to Ping! The link is active.");
+            check_app_version(&phone, &pong.device_name, &pong, on_event)?;
             let device_name = pong.device_name;
             if route != Route::Wifi {
                 pair_for_wifi(&phone, &device_name);
@@ -442,6 +519,52 @@ fn answering(
         None if phone.closed_by_phone() => Err(Ended::ClosedByPhone),
         None => Err(Ended::PhoneLost),
     }
+}
+
+fn check_app_version(
+    phone: &PhoneClient,
+    device_name: &str,
+    pong: &Pong,
+    on_event: &dyn Fn(Event),
+) -> Result<(), Ended> {
+    let code = pong.app_version_code;
+    let version = phone_versions::name_of(code, &pong.app_version_name);
+    let (required, latest) = match phone_versions::judge(code) {
+        Verdict::Current => return Ok(()),
+        Verdict::Newer => {
+            log::info!(
+                "ℹ️  The phone's app ({version}) is newer than this PC app knows of: there may be an update for this PC."
+            );
+            on_event(Event::PhoneNewer);
+            return Ok(());
+        }
+        Verdict::Outdated { latest } => (false, latest),
+        Verdict::Unsupported { latest, .. } => (true, latest),
+    };
+
+    let phone_shows_it = code >= phone_versions::SHOWS_UPDATE_SCREEN;
+    if phone_shows_it && let Err(e) = phone.update_notice(required, latest.name) {
+        log::debug!("Couldn't show the phone its update screen: {e}");
+    }
+    on_event(Event::PhoneOutdated {
+        device_name: device_name.to_string(),
+        version: version.clone(),
+        code: code.max(1),
+        latest: latest.name,
+        required,
+        phone_shows_it,
+    });
+    if required {
+        return Err(failed(format!(
+            "The WinDroidFS app on {device_name} ({version}) is too old for this PC. Update it to {} or later.",
+            latest.name
+        )));
+    }
+    log::info!(
+        "⬆️  WinDroidFS {} is out for the phone ({device_name} has {version}).",
+        latest.name
+    );
+    Ok(())
 }
 
 /// Swap certificates over this USB link, so the phone can be reached over Wi-Fi later. Older phone apps can't, which is fine.
@@ -522,9 +645,58 @@ fn connect_adb(
     }
 }
 
-/// Connect to the phone app over the tethering link, waiting for it to be opened. `None` if stopped, or if tethering ends first.
+/// How long the tethering network may take to appear once the phone's USB says it's tethering, and how long it may vanish before the link is gone
+const TETHER_NETWORK_WAIT: Duration = Duration::from_secs(20);
+const TETHER_BLINK: Duration = Duration::from_secs(5);
+
+/// Whether an Android phone on USB is in its tethering configuration: an RNDIS or CDC NCM/ECM network interface
+fn phone_is_tethering() -> bool {
+    let Ok(context) = Context::new() else {
+        return false;
+    };
+    let Ok(devices) = context.devices() else {
+        return false;
+    };
+    devices.iter().any(|device| {
+        device
+            .device_descriptor()
+            .is_ok_and(|desc| is_normal_android_identity(desc.vendor_id(), desc.product_id()))
+            && device.active_config_descriptor().is_ok_and(|config| {
+                config.interfaces().any(|interface| {
+                    interface.descriptors().any(|d| {
+                        is_network_interface(d.class_code(), d.sub_class_code(), d.protocol_code())
+                    })
+                })
+            })
+    })
+}
+
+/// RNDIS, CDC NCM or CDC ECM
+fn is_network_interface(class: u8, subclass: u8, protocol: u8) -> bool {
+    matches!(
+        (class, subclass, protocol),
+        (0xE0, 0x01, 0x03) | (0xEF, 0x04, 0x01) | (0x02, 0x0D, _) | (0x02, 0x06, _)
+    )
+}
+
+/// The phone's tethering address once Windows has set up the network, while the phone stays in tethering mode
+fn wait_for_tether_network(stop: &Stop) -> Option<SocketAddr> {
+    let deadline = Instant::now() + TETHER_NETWORK_WAIT;
+    while Instant::now() < deadline && phone_is_tethering() {
+        if let Some(addr) = tether::phone_address() {
+            return Some(addr);
+        }
+        if stop.sleep(Duration::from_millis(500)) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Connect to the phone app over the tethering link, waiting for it to be opened - `None` if stopped or if tethering ends first.
 fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<TcpStream> {
     let mut asked = false;
+    let mut gone_since: Option<Instant> = None;
     loop {
         match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
             Ok(stream) => return Some(stream),
@@ -536,13 +708,18 @@ fn connect_tethered(addr: SocketAddr, stop: &Stop, on_event: &dyn Fn(Event)) -> 
             }
             Err(_) => {}
         }
-        if stop.sleep(Duration::from_secs(1)) || tether::phone_address() != Some(addr) {
+        if stop.sleep(Duration::from_secs(1)) {
+            return None;
+        }
+        if tether::phone_address() == Some(addr) {
+            gone_since = None;
+        } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= TETHER_BLINK {
             return None;
         }
     }
 }
 
-/// Ping the phone until its app answers, returning the phone's name. `None` if stopped, or if the phone is unplugged first.
+/// Ping the phone until its app answers, returning the phone's name - `None` if stopped or if the phone is unplugged first
 fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> Option<Pong> {
     let mut asked = false;
     let mut locked = false;
@@ -577,7 +754,36 @@ fn wait_for_app(phone: &PhoneClient, stop: &Stop, on_event: &dyn Fn(Event)) -> O
     }
 }
 
-/// Mount the phone and keep it mounted until stopped or the phone goes away. WinFsp when it's available, otherwise the WebDAV fallback.
+/// Asks the driver service to publish the drive globally
+fn publish_drive(drive: char) -> bool {
+    match send(&Request::PublishDrive { letter: drive }) {
+        Ok(Response::Ok { detail }) => {
+            log::info!("🛡️  {detail}.");
+            true
+        }
+        Ok(Response::Err { message }) => {
+            log::warn!("⚠️  Programs run as administrator won't see {drive}: ({message}).");
+            false
+        }
+        Ok(Response::Pong) => false,
+        Err(e) => {
+            log::warn!(
+                "⚠️  Programs run as administrator won't see {drive}: (the driver service isn't reachable: {e})."
+            );
+            false
+        }
+    }
+}
+
+fn unpublish_drive(drive: char) {
+    match send(&Request::UnpublishDrive { letter: drive }) {
+        Ok(Response::Err { message }) => log::warn!("⚠️  {message}"),
+        Err(e) => log::warn!("⚠️  Couldn't take back {drive}: from elevated programs: {e}"),
+        Ok(_) => {}
+    }
+}
+
+/// Mount the phone and keep it mounted until stopped or the phone goes away. WinFsp when available, WebDAV as fallback
 fn serve(
     phone: PhoneClient,
     device_name: &str,
@@ -606,6 +812,8 @@ fn serve(
                     );
                 }
                 log::info!("💽 \"{label}\" is mounted at {}:\\.", mount.drive);
+                global_drive::label_in_explorer(label);
+                let published = publish_drive(mount.drive);
                 on_event(Event::Mounted {
                     drive: mount.drive,
                     device_name: device_name.to_string(),
@@ -618,6 +826,9 @@ fn serve(
                     }
                 });
                 log::info!("Unmounting {}:...", mount.drive);
+                if published {
+                    unpublish_drive(mount.drive);
+                }
                 mount.unmount();
                 say_goodbye(&phone, &ended);
                 return ended;
@@ -659,7 +870,7 @@ fn wait_while_mounted(phone: &PhoneClient, stop: &Stop, tick: impl Fn()) -> Ende
     Ended::PhoneLost
 }
 
-/// The fallback mount: a local WebDAV server mapped to a drive letter with `net use`.
+/// The fallback mount: a local WebDAV server mapped to a drive letter with `net use`
 fn mount_webdav(
     phone: PhoneClient,
     device_name: &str,
@@ -674,7 +885,6 @@ fn mount_webdav(
     let target = format!("{letter}:");
     let addr = SocketAddr::from(WEBDAV_ADDR);
     let url = format!("http://{addr}");
-    // Kept alive until this function returns: dropping it stops the server.
     let rt = tokio::runtime::Runtime::new().expect("failed to start the async runtime");
 
     log::info!("🌐 Starting WebDAV server on {url}...");
@@ -717,13 +927,13 @@ fn mount_webdav(
     ended
 }
 
-/// The phone's identity on the bus.
+/// The phone's identity on the bus
 enum Found {
     Normal(u16, u16),
     Accessory,
 }
 
-/// Look for the phone until `timeout`. `None` if it never shows up, or if stopped.
+/// Look for the phone until `timeout` - `None` if it never shows up or if stopped
 fn find_phone(stop: &Stop, timeout: Duration) -> rusb::Result<Option<Found>> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -999,6 +1209,71 @@ fn find_aoa_endpoints(device: &Device<Context>) -> rusb::Result<Option<(u8, u8, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seen(link: LinkChoice, usb: bool, tether: bool) -> Presence {
+        Presence {
+            link,
+            usb,
+            tether: tether.then(|| "192.168.42.129:9999".parse().unwrap()),
+            ..Presence::default()
+        }
+    }
+
+    #[test]
+    fn each_link_only_counts_what_it_can_use() {
+        let accessory_only = seen(LinkChoice::Auto, true, false);
+        assert!(accessory_only.any());
+        assert!(
+            !Presence {
+                link: LinkChoice::Tethering,
+                ..accessory_only.clone()
+            }
+            .any()
+        );
+        assert!(
+            !Presence {
+                link: LinkChoice::Adb,
+                ..accessory_only.clone()
+            }
+            .any()
+        );
+        assert!(
+            Presence {
+                link: LinkChoice::DirectUsb,
+                ..accessory_only
+            }
+            .any()
+        );
+        assert!(seen(LinkChoice::Tethering, true, true).any());
+        assert!(!seen(LinkChoice::Auto, false, false).any());
+    }
+
+    #[test]
+    fn turning_tethering_on_or_off_counts_as_a_change() {
+        let ended = seen(LinkChoice::Auto, true, false);
+        let tethering = seen(LinkChoice::Auto, true, true);
+        assert_ne!(ended, tethering);
+        assert_ne!(tethering, ended);
+        assert_eq!(ended, seen(LinkChoice::Auto, true, false));
+        assert_ne!(
+            ended,
+            Presence {
+                link: LinkChoice::DirectUsb,
+                ..ended.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn recognises_tethering_interfaces() {
+        assert!(is_network_interface(0xE0, 0x01, 0x03)); // RNDIS, as Android describes it
+        assert!(is_network_interface(0xEF, 0x04, 0x01)); // RNDIS, as Windows' class driver matches it
+        assert!(is_network_interface(0x02, 0x0D, 0x00)); // CDC NCM
+        assert!(is_network_interface(0x02, 0x06, 0x00)); // CDC ECM
+        assert!(!is_network_interface(0x06, 0x01, 0x01)); // MTP
+        assert!(!is_network_interface(0xFF, 0x42, 0x01)); // adb
+        assert!(!is_network_interface(0xFF, 0xFF, 0x00)); // Accessory Mode
+    }
 
     #[test]
     fn advises_only_below_usb_3() {

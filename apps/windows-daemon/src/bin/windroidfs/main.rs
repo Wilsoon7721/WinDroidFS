@@ -3,9 +3,10 @@
 mod autostart;
 mod notify;
 mod settings;
+mod updates;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,9 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
-    MSG, MessageBoxW, PostQuitMessage, PostThreadMessageW, TranslateMessage, WM_APP,
+    DispatchMessageW, GetMessageW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING,
+    MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MSG, MessageBoxW, PostQuitMessage,
+    PostThreadMessageW, TranslateMessage, WM_APP,
 };
 use windows_sys::core::BOOL;
 use windroidfs::ipc::transport;
@@ -49,7 +51,12 @@ const FALLBACK_POLL: Duration = Duration::from_secs(30);
 /// How long to wait before checking the driver service again when it isn't running.
 const SERVICE_RETRY: Duration = Duration::from_secs(3);
 
-/// The `ICON` resource embedded by build.rs (assets/icon.rc).
+/// After a link ends, how long the phone may vanish without that counting as an unplug. Leaving Accessory Mode or a driver being put back re-enumerates the phone which can take up to 10 seconds
+const SETTLE: Duration = Duration::from_secs(20);
+
+/// How long to wait after tethering ends but USB tethering still on
+const TETHER_RETRY: Duration = Duration::from_secs(2);
+
 const ICON_RESOURCE: u16 = 1;
 
 /// WinFsp's FLOSS exception requires this notice and link in the user interface.
@@ -129,12 +136,16 @@ struct Shared {
     session_stop: Mutex<Stop>,
     /// Set with a stop that should reconnect straight away (a setting changed), rather than count as the user turning things off.
     restart: AtomicBool,
+    /// Set by Reconnect: try again now, even though nothing about the phone changed since the last link ended.
+    reconnect: AtomicBool,
     quit: AtomicBool,
     /// Wakes when a USB device comes or goes, or when told to look again.
     watch: UsbWatch,
     /// The slow link speed already notified about, so reconnecting over the same cable doesn't repeat it. Cleared when a fast connection comes along.
     warned_speed: Mutex<Option<UsbSpeed>>,
     ui_thread: u32,
+    /// Asks the updates thread to check for a newer PC app (see `updates`).
+    update_checks: mpsc::Sender<updates::Check>,
 }
 
 impl Shared {
@@ -188,20 +199,36 @@ fn main() {
     logging::set_file_logging(settings.log);
     log::info!("WinDroidFS {} started.", env!("CARGO_PKG_VERSION"));
 
+    if std::env::args().any(|arg| arg == "--installed") {
+        std::thread::spawn(|| {
+            message_box(
+                "WinDroidFS is running in the system tray, by the clock. If you can't see its icon, \
+                 it may be under the ^ arrow.\n\nConnect your phone to open its drive, or right-click \
+                 the icon for options.",
+                "WinDroidFS",
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        });
+    }
+
     UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
     unsafe { SetConsoleCtrlHandler(Some(on_console_event), 1) };
 
+    let (update_checks, checks) = mpsc::channel();
     let shared = Arc::new(Shared {
         settings: Mutex::new(settings),
         status: Mutex::new(Status::WaitingForPhone),
         status_version: AtomicU64::new(1),
         session_stop: Mutex::new(Stop::new()),
         restart: AtomicBool::new(false),
+        reconnect: AtomicBool::new(false),
         quit: AtomicBool::new(false),
         watch: UsbWatch::new(),
         warned_speed: Mutex::new(None),
         ui_thread: unsafe { GetCurrentThreadId() },
+        update_checks,
     });
+    updates::spawn(shared.clone(), checks);
 
     let supervisor = {
         let shared = shared.clone();
@@ -256,28 +283,45 @@ fn shutdown(shared: &Shared, supervisor: JoinHandle<()>) {
 
 /// Wait for a phone, connect, repeat, until told to quit.
 fn supervise(shared: &Shared) {
-    let mut wait_for_unplug = false;
+    let mut held_at: Option<session::Presence> = None;
+    let mut ended_at = Instant::now();
     let mut remounting = false;
 
     while !shared.quit.load(Ordering::SeqCst) {
         let settings = shared.settings();
         if !settings.enabled {
-            wait_for_unplug = false;
+            held_at = None;
             shared.set_status(Status::Off);
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
+        if shared.reconnect.swap(false, Ordering::SeqCst) {
+            held_at = None;
+        }
 
-        if !session::phone_present(settings.link) {
-            wait_for_unplug = false;
+        let presence = session::presence(settings.link);
+        // Straight after a link ended, the phone vanishing and reappearing on USB is re-enumeration, not a replug.
+        let settling = SETTLE.saturating_sub(ended_at.elapsed());
+        if let Some(held) = held_at.as_mut()
+            && !settling.is_zero()
+        {
+            held.adopt_usb(&presence);
+        }
+        if !presence.any() {
+            if held_at.is_some() && !settling.is_zero() {
+                shared.watch.wait(settling);
+                continue;
+            }
+            held_at = None;
             shared.set_status(Status::WaitingForPhone);
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
-        if wait_for_unplug {
+        if held_at.as_ref() == Some(&presence) {
             shared.watch.wait(FALLBACK_POLL);
             continue;
         }
+        held_at = None;
 
         if session::needs_service(settings.link) && !transport::service_available() {
             shared.set_status(Status::NoService);
@@ -308,6 +352,25 @@ fn supervise(shared: &Shared) {
             ),
             Event::WaitingForApp => shared.set_status(Status::WaitingForApp),
             Event::WaitingForUnlock => shared.set_status(Status::WaitingForUnlock),
+            Event::PhoneOutdated {
+                device_name,
+                version,
+                code,
+                latest,
+                required,
+                phone_shows_it,
+            } => note_phone_outdated(
+                shared,
+                &device_name,
+                &version,
+                code,
+                latest,
+                required,
+                phone_shows_it,
+            ),
+            Event::PhoneNewer => {
+                let _ = shared.update_checks.send(updates::Check::PhoneNewer);
+            }
             Event::Mounted {
                 drive,
                 device_name,
@@ -327,29 +390,27 @@ fn supervise(shared: &Shared) {
             }
         };
 
-        match session::run(&options, &stop, &on_event) {
+        let ended = session::run(&options, &stop, &on_event);
+        if matches!(ended, Ended::PhoneLost | Ended::ClosedByPhone)
+            && session::presence(settings.link).tethered()
+        {
+            shared.watch.wait(TETHER_RETRY);
+            continue;
+        }
+        let message = match ended {
             Ended::Stopped => {
                 remounting = shared.restart.swap(false, Ordering::SeqCst);
+                continue;
             }
-            Ended::ClosedByPhone => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(
-                    "Disconnected from the phone. Unplug and replug it to reconnect.".into(),
-                ));
-            }
-            Ended::PhoneLost => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(
-                    "Disconnected. Unplug and replug the phone to reconnect.".into(),
-                ));
-            }
-            Ended::Failed(why) => {
-                wait_for_unplug = true;
-                shared.set_status(Status::Ended(format!(
-                    "{why} Unplug and replug the phone to try again."
-                )));
-            }
-        }
+            Ended::ClosedByPhone => "The phone disconnected.".to_string(),
+            Ended::PhoneLost => "Disconnected.".to_string(),
+            Ended::Failed(why) => why,
+        };
+        held_at = Some(presence);
+        ended_at = Instant::now();
+        shared.set_status(Status::Ended(format!(
+            "{message} Choose Reconnect, or replug the phone, to try again."
+        )));
     }
 }
 
@@ -368,6 +429,7 @@ struct Tray {
     icon: TrayIcon,
     status: MenuItem,
     open: MenuItem,
+    reconnect: MenuItem,
     enabled: CheckMenuItem,
     drives: Vec<(DriveChoice, CheckMenuItem)>,
     links: Vec<(LinkChoice, CheckMenuItem)>,
@@ -376,6 +438,7 @@ struct Tray {
     pair: MenuItem,
     forget: MenuItem,
     autostart: CheckMenuItem,
+    check_updates: MenuItem,
     about: MenuItem,
     quit: MenuItem,
     /// The status version last shown
@@ -388,6 +451,7 @@ impl Tray {
 
         let status = MenuItem::new("", false, None);
         let open = MenuItem::new("Open drive", false, None);
+        let reconnect = MenuItem::new("Reconnect", false, None);
         let enabled =
             CheckMenuItem::new("Mount phones when plugged in", true, settings.enabled, None);
 
@@ -440,6 +504,11 @@ impl Tray {
             ),
             toggle("Read-only", |s| &mut s.read_only, true),
             toggle("Hide dot-files", |s| &mut s.hide_dotfiles, true),
+            toggle(
+                "Check for updates automatically",
+                |s| &mut s.check_for_updates,
+                false,
+            ),
             // Troubleshooting
             toggle("Use WebDAV instead of WinFsp", |s| &mut s.use_webdav, true),
             Toggle {
@@ -448,18 +517,19 @@ impl Tray {
             },
         ];
         let options_menu = Submenu::new("Options", true);
-        for toggle in &toggles[..3] {
+        for toggle in &toggles[..4] {
             options_menu.append(&toggle.item)?;
         }
         let open_log = MenuItem::new("Open log folder", true, None);
         let troubleshooting_menu = Submenu::new("Troubleshooting", true);
-        for toggle in &toggles[3..] {
+        for toggle in &toggles[4..] {
             troubleshooting_menu.append(&toggle.item)?;
         }
         troubleshooting_menu.append(&open_log)?;
 
         let autostart =
             CheckMenuItem::new("Start with Windows", true, autostart::is_enabled(), None);
+        let check_updates = MenuItem::new("Check for updates...", true, None);
         let about = MenuItem::new("About WinDroidFS", true, None);
         let quit = MenuItem::new("Quit WinDroidFS", true, None);
 
@@ -467,6 +537,7 @@ impl Tray {
         let items: &[&dyn IsMenuItem] = &[
             &status,
             &open,
+            &reconnect,
             &PredefinedMenuItem::separator(),
             &enabled,
             &link_menu,
@@ -475,6 +546,7 @@ impl Tray {
             &troubleshooting_menu,
             &autostart,
             &PredefinedMenuItem::separator(),
+            &check_updates,
             &about,
             &quit,
         ];
@@ -491,6 +563,7 @@ impl Tray {
             icon,
             status,
             open,
+            reconnect,
             enabled,
             drives,
             links,
@@ -499,6 +572,7 @@ impl Tray {
             pair,
             forget,
             autostart,
+            check_updates,
             about,
             quit,
             shown_version: 0,
@@ -537,12 +611,17 @@ impl Tray {
             unsafe { PostQuitMessage(0) };
         } else if id == self.open.id() {
             open_drive(shared);
+        } else if id == self.reconnect.id() {
+            shared.reconnect.store(true, Ordering::SeqCst);
+            shared.watch.wake();
         } else if id == self.pair.id() {
             std::thread::spawn(pair_over_wifi);
         } else if id == self.forget.id() {
             forget_wifi_phones();
         } else if id == self.open_log.id() {
             open_log_folder();
+        } else if id == self.check_updates.id() {
+            let _ = shared.update_checks.send(updates::Check::Manual);
         } else if id == self.about.id() {
             show_about();
         } else if id == self.enabled.id() {
@@ -655,6 +734,8 @@ impl Tray {
                 self.open.set_enabled(false);
             }
         }
+        self.reconnect
+            .set_enabled(matches!(status, Status::Ended(_)));
         self.enabled.set_checked(shared.settings().enabled);
     }
 }
@@ -674,6 +755,51 @@ fn warn_if_slow(shared: &Shared, speed: UsbSpeed) {
         &format!("USB Type: {}", session::speed_name(speed)),
         &advice,
     );
+}
+
+fn note_phone_outdated(
+    shared: &Shared,
+    device_name: &str,
+    version: &str,
+    code: u32,
+    latest: &str,
+    required: bool,
+    phone_shows_it: bool,
+) {
+    if !required {
+        let mut settings = lock(&shared.settings);
+        if settings.phone_update_noted == code {
+            return;
+        }
+        settings.phone_update_noted = code;
+        settings.save();
+        if phone_shows_it {
+            return;
+        }
+    }
+    let phone = if device_name.is_empty() {
+        "your phone"
+    } else {
+        device_name
+    };
+    let why = if required {
+        format!("This PC can't connect to it until it's updated to {latest}.")
+    } else {
+        format!(
+            "It has {version}; {latest} is out, with fixes and improvements. It still works meanwhile."
+        )
+    };
+    let text = format!(
+        "Update the WinDroidFS app on {phone}.\n\n{why}\n\nUpdate it where you installed it from: F-Droid, IzzyOnDroid \
+         or the GitHub releases page."
+    );
+    std::thread::spawn(move || {
+        message_box(
+            &text,
+            "WinDroidFS",
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    });
 }
 
 fn message_box(text: &str, caption: &str, style: u32) -> i32 {

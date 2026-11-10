@@ -17,6 +17,10 @@ pub enum Request {
     EnsureWinusb { instance_id: String },
     /// Put every Android device that's stuck on WinUSB back on its original driver.
     RestoreAll,
+    /// Also define this drive letter globally, so elevated programs see the caller's mounted phone.
+    PublishDrive { letter: char },
+    /// Take back a letter [`Request::PublishDrive`] defined.
+    UnpublishDrive { letter: char },
 }
 
 // What the service answers
@@ -50,6 +54,8 @@ impl Request {
             Request::Rollback { instance_id } => format!("ROLLBACK {instance_id}"),
             Request::EnsureWinusb { instance_id } => format!("ENSURE_WINUSB {instance_id}"),
             Request::RestoreAll => "RESTORE_ALL".into(),
+            Request::PublishDrive { letter } => format!("PUBLISH_DRIVE {letter}"),
+            Request::UnpublishDrive { letter } => format!("UNPUBLISH_DRIVE {letter}"),
         }
     }
 
@@ -69,6 +75,15 @@ impl Request {
             }
         };
 
+        // Exactly one ASCII letter
+        let letter = || -> Result<char, ParseError> {
+            let mut chars = rest.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii_alphabetic() => Ok(c.to_ascii_uppercase()),
+                _ => Err(ParseError(format!("{verb} needs a drive letter"))),
+            }
+        };
+
         match verb {
             "PING" => Ok(Request::Ping),
             "BEGIN_SWAP" => Ok(Request::BeginSwap {
@@ -81,6 +96,8 @@ impl Request {
                 instance_id: instance()?,
             }),
             "RESTORE_ALL" => Ok(Request::RestoreAll),
+            "PUBLISH_DRIVE" => Ok(Request::PublishDrive { letter: letter()? }),
+            "UNPUBLISH_DRIVE" => Ok(Request::UnpublishDrive { letter: letter()? }),
             other => Err(ParseError(format!("unknown command {other:?}"))),
         }
     }
@@ -220,6 +237,16 @@ pub mod transport {
             writeln!(self.0, "{}", response.encode())?;
             self.0.flush()
         }
+
+        /// The process on the other end of the pipe.
+        pub fn client_pid(&self) -> io::Result<u32> {
+            self.0.client_pid()
+        }
+
+        /// Run `f` as the client, e.g. to see drive letters as its logon session does. Only after reading its request.
+        pub fn as_client<T>(&self, f: impl FnOnce() -> T) -> io::Result<T> {
+            self.0.as_client(f)
+        }
     }
 
     #[cfg(windows)]
@@ -230,12 +257,13 @@ pub mod transport {
 
         use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE, LocalFree};
         use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Security::{RevertToSelf, SECURITY_ATTRIBUTES};
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
         };
         use windows_sys::Win32::System::Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+            ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_TYPE_BYTE, PIPE_WAIT,
         };
 
@@ -249,6 +277,39 @@ pub mod transport {
         /// A connected pipe instance. Closes on drop.
         pub struct PipeStream {
             handle: OwnedHandle,
+        }
+
+        impl PipeStream {
+            pub fn client_pid(&self) -> io::Result<u32> {
+                use std::os::windows::io::AsRawHandle;
+                let mut pid = 0u32;
+                let ok = unsafe {
+                    GetNamedPipeClientProcessId(self.handle.as_raw_handle() as _, &mut pid)
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(pid)
+            }
+
+            pub fn as_client<T>(&self, f: impl FnOnce() -> T) -> io::Result<T> {
+                use std::os::windows::io::AsRawHandle;
+                if unsafe { ImpersonateNamedPipeClient(self.handle.as_raw_handle() as _) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // Revert even if `f` panics: carrying on as the client would be a privilege leak.
+                struct Revert;
+                impl Drop for Revert {
+                    fn drop(&mut self) {
+                        if unsafe { RevertToSelf() } == 0 {
+                            // Never keep running with someone else's identity.
+                            std::process::abort();
+                        }
+                    }
+                }
+                let _revert = Revert;
+                Ok(f())
+            }
         }
 
         impl Read for PipeStream {
@@ -369,9 +430,28 @@ mod tests {
             Request::EnsureWinusb {
                 instance_id: r"USB\VID_18D1&PID_2D01\R5CY204BABT".into(),
             },
+            Request::PublishDrive { letter: 'Z' },
+            Request::UnpublishDrive { letter: 'Z' },
         ];
         for req in cases {
             assert_eq!(Request::decode(&req.encode()).unwrap(), req);
+        }
+        assert_eq!(
+            Request::decode("PUBLISH_DRIVE z").unwrap(),
+            Request::PublishDrive { letter: 'Z' }
+        );
+    }
+
+    #[test]
+    fn drive_requests_need_exactly_one_letter() {
+        for bad in [
+            "PUBLISH_DRIVE",
+            "PUBLISH_DRIVE ZZ",
+            "PUBLISH_DRIVE 1",
+            "PUBLISH_DRIVE Z:",
+            "UNPUBLISH_DRIVE é",
+        ] {
+            assert!(Request::decode(bad).is_err(), "{bad} was accepted");
         }
     }
 

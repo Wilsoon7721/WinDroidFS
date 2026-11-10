@@ -1,0 +1,41 @@
+name: Enhancement
+description: Suggest a way to make something WinDroidFS already does better
+labels: ["enhancement"]
+body:
+  - type: input
+    id: feature
+    attributes:
+      label: Which part of WinDroidFS?
+      placeholder: Copying over Wi-Fi, the tray menu, the phone's dashboard...
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How does it work today?
+      description: What it does now, and what about that seems insufficient for you.
+    validations:
+      required: true
+  - type: textarea
+    id: better
+    attributes:
+      label: How could it be better?
+      description: What you'd change and how it would help you.
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection, if it's about one
+      options:
+        - Not about a connection
+        - Direct USB
+        - USB tethering
+        - Wi-Fi
+        - ADB
+        - All types
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Screenshots, measurements (copy speeds, times), or examples from other apps.

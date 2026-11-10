@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::frame::{self, Frame};
+use crate::socket::Guarded;
 use prost::Message;
 use rusb::{Context, DeviceHandle};
 
@@ -14,8 +15,8 @@ use crate::windroid::packet::Payload;
 use crate::windroid::{
     CreateRequest, DeleteRequest, DirectoryRequest, ErrorCode, FileInfo, FileReadRequest,
     FlushRequest, Goodbye, OperationResponse, Packet, PairRequest, PairResponse, Ping, Pong,
-    RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UsbSpeed, VolumeInfoRequest,
-    WriteRequest,
+    RenameRequest, SetTimesRequest, StatRequest, TruncateRequest, UpdateNotice, UsbSpeed,
+    VolumeInfoRequest, WriteRequest,
 };
 
 /// How long to wait for the phone to answer a request
@@ -107,7 +108,10 @@ impl PhoneClient {
     pub fn over_tcp(stream: TcpStream) -> io::Result<Self> {
         // Each request waits for its reply, so don't let Nagle hold them back.
         stream.set_nodelay(true)?;
-        Ok(Self::spawn(Box::new(Tcp(stream)), UsbSpeed::Unknown))
+        Ok(Self::spawn(
+            Box::new(Tcp(Guarded::new(stream))),
+            UsbSpeed::Unknown,
+        ))
     }
 
     /// The same, over Wi-Fi with the TLS handshake already done (see `wifi::connect`).
@@ -350,6 +354,16 @@ impl PhoneClient {
         Ok(resp)
     }
 
+    /// Tell the phone its app needs updating, so it shows its "Outdated version" screen. Phone apps that predate this
+    /// answer with an empty reply, which is fine: they can't show the screen, and the PC says so instead.
+    pub fn update_notice(&self, required: bool, latest_version: &str) -> Result<(), PhoneError> {
+        self.operation(Payload::UpdateNotice(UpdateNotice {
+            required,
+            latest_version: latest_version.to_string(),
+        }))
+        .map(|_| ())
+    }
+
     /// Have the phone close and sync a file it has been writing.
     pub fn flush(&self, path: &str) -> Result<(), PhoneError> {
         self.operation(Payload::FlushRequest(FlushRequest {
@@ -435,6 +449,7 @@ impl Transport for Tls {
     fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError> {
         self.0
             .sock
+            .get_ref()
             .set_write_timeout(Some(timeout))
             .map_err(tcp_error)?;
         self.0.write_all(bytes).map_err(tcp_error)?;
@@ -445,6 +460,7 @@ impl Transport for Tls {
         let timeout = timeout.max(Duration::from_millis(1));
         self.0
             .sock
+            .get_ref()
             .set_read_timeout(Some(timeout))
             .map_err(tcp_error)?;
         // A timeout mid-record is fine: rustls keeps what it has and carries on next time.
@@ -466,22 +482,28 @@ impl Transport for Tls {
     fn close(&mut self) {
         self.0.conn.send_close_notify();
         let _ = self.0.flush();
-        let _ = self.0.sock.shutdown(Shutdown::Both);
+        let _ = self.0.sock.get_ref().shutdown(Shutdown::Both);
     }
 }
 
-struct Tcp(TcpStream);
+struct Tcp(Guarded);
 
 impl Transport for Tcp {
     fn send(&mut self, bytes: &[u8], timeout: Duration) -> Result<(), PhoneError> {
-        self.0.set_write_timeout(Some(timeout)).map_err(tcp_error)?;
+        self.0
+            .get_ref()
+            .set_write_timeout(Some(timeout))
+            .map_err(tcp_error)?;
         self.0.write_all(bytes).map_err(tcp_error)
     }
 
     fn receive(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, PhoneError> {
         // A zero timeout means "wait forever" to a socket.
         let timeout = timeout.max(Duration::from_millis(1));
-        self.0.set_read_timeout(Some(timeout)).map_err(tcp_error)?;
+        self.0
+            .get_ref()
+            .set_read_timeout(Some(timeout))
+            .map_err(tcp_error)?;
         match self.0.read(buf) {
             Ok(0) => Err(PhoneError::Disconnected),
             Ok(n) => Ok(n),
@@ -498,7 +520,7 @@ impl Transport for Tcp {
     }
 
     fn close(&mut self) {
-        let _ = self.0.shutdown(Shutdown::Both);
+        let _ = self.0.get_ref().shutdown(Shutdown::Both);
     }
 }
 
@@ -534,6 +556,8 @@ fn link_thread(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
+        let what = describe(&job.payload);
+        let started = Instant::now();
         let result = link.exchange(job.payload, job.timeout);
         established |= result.is_ok();
         let link_failed = match &result {
@@ -546,6 +570,21 @@ fn link_thread(
             _ => false,
         };
 
+        if let Err(e) = &result {
+            // Which request the phone was stuck on, when it stops answering, is the only clue to why.
+            let (level, verdict) = if link_failed {
+                (log::Level::Warn, "giving up on the link")
+            } else {
+                (log::Level::Debug, "the link is still up")
+            };
+            if !matches!(e, PhoneError::Remote { .. }) {
+                log::log!(
+                    level,
+                    "⚠️  {what} failed after {:.1}s: {e}; {verdict}.",
+                    started.elapsed().as_secs_f32()
+                );
+            }
+        }
         let _ = job.reply.send(result);
         if link_failed {
             break;
@@ -555,6 +594,37 @@ fn link_thread(
     // From here on every request fails at once (see `PhoneClient::call`). Queued jobs will also fail.
     alive.store(false, Ordering::SeqCst);
     link.transport.close();
+}
+
+/// A request in a few words for the log, e.g. "write of 1048576 bytes at 3145728 to /x/big1.bin". Never the data.
+fn describe(payload: &Payload) -> String {
+    match payload {
+        Payload::Ping(_) => "ping".into(),
+        Payload::DirRequest(r) => format!("listing {}", r.path),
+        Payload::StatRequest(r) => format!("stat of {}", r.path),
+        Payload::FileReq(r) => format!(
+            "read of {} bytes at {} from {}",
+            r.max_bytes, r.offset, r.path
+        ),
+        Payload::WriteRequest(r) => {
+            format!(
+                "write of {} bytes at {} to {}",
+                r.data.len(),
+                r.offset,
+                r.path
+            )
+        }
+        Payload::CreateRequest(r) => format!("create of {}", r.path),
+        Payload::TruncateRequest(r) => format!("resize of {} to {} bytes", r.path, r.size),
+        Payload::DeleteRequest(r) => format!("delete of {}", r.path),
+        Payload::RenameRequest(r) => format!("rename of {} to {}", r.from_path, r.to_path),
+        Payload::SetTimesRequest(r) => format!("timestamp of {}", r.path),
+        Payload::FlushRequest(r) => format!("sync of {}", r.path),
+        Payload::VolumeRequest(_) => "free-space check".into(),
+        Payload::Goodbye(_) => "goodbye".into(),
+        Payload::UpdateNotice(_) => "update notice".into(),
+        _ => "request".into(),
+    }
 }
 
 impl Link {
@@ -590,13 +660,11 @@ fn exchange(
     scratch: &mut [u8],
     timeout: Duration,
 ) -> Result<Payload, PhoneError> {
-    // Header and payload go out in one write, so they arrive as one transfer
     let framed = frame::encode(&request.encode_to_vec());
     transport.send(&framed, WRITE_TIMEOUT.min(timeout))?;
 
     let deadline = Instant::now() + timeout;
     loop {
-        // Use whatever is already buffered. An earlier read may have brought in this reply, or a stale one that needs clearing.
         loop {
             match frame::take_frame(inbox) {
                 Frame::Complete(bytes) => match Packet::decode(bytes.as_slice()) {
@@ -632,8 +700,6 @@ fn exchange(
             )));
         }
 
-        // A timeout here just means nothing more has arrived yet: keep what's buffered and go round again until the deadline.
-        // Throwing partial data away is what used to leave the 2 sides permanently out of step.
         let n = transport.receive(scratch, deadline - now)?;
         inbox.extend_from_slice(&scratch[..n]);
     }

@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in WinDroidFS doesn't work as it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected instead. Screenshots of error messages help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Plug in the phone with Direct USB
+        2. Copy a large folder to the drive
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - Direct USB
+        - USB tethering
+        - Wi-Fi
+        - ADB
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: pc-version
+    attributes:
+      label: WinDroidFS version on the PC
+      description: Right-click the tray icon, then About WinDroidFS.
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: phone-version
+    attributes:
+      label: WinDroidFS version on the phone
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model and Android version
+      placeholder: Samsung Galaxy S25+, Android 16
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Right-click the tray icon, then Troubleshooting > Open log folder, and paste the end of windroidfs.log from around when it happened. Check it for anything you'd rather not share first.
+      render: text

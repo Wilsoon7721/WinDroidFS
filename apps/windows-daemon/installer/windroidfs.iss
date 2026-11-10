@@ -19,7 +19,7 @@
 ; (from https://winfsp.dev/rel/). WinFsp's FLOSS exception allows bundling it only unmodified.
 
 #define AppName "WinDroidFS"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 #define AppPublisher "Wilson Oon"
 #define ServiceExe "windroidfs-service.exe"
 #define DaemonExe "windows-daemon.exe"
@@ -47,6 +47,10 @@ OutputBaseFilename=WinDroidFS-Setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The app icon in place of Inno's default box (top right) and disc (Finish page, left).
+; Each lists one PNG per DPI scale, 100% to 250%; Setup picks the closest.
+WizardSmallImageFile=images\small-100.png,images\small-125.png,images\small-150.png,images\small-200.png,images\small-250.png
+WizardImageFile=images\large-100.png,images\large-125.png,images\large-150.png,images\large-200.png,images\large-250.png
 
 [Files]
 ; Paths are relative to this .iss file (installer\), so step up to the crate root.
@@ -69,8 +73,10 @@ Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#WinFspMsi}"" /qn /nores
 ; ServiceManager work (see its `install` command), so the installer just invokes it.
 Filename: "{app}\{#ServiceExe}"; Parameters: "install"; Flags: runhidden waituntilterminated; StatusMsg: "Registering the WinDroidFS driver service..."
 ; Start the tray app as the user who ran setup, not as the elevated installer: it mounts drives
-; and writes settings for that user.
-Filename: "{app}\{#TrayExe}"; Description: "Start WinDroidFS now"; Flags: postinstall nowait runasoriginaluser
+; and writes settings for that user. --installed makes it say where it went.
+Filename: "{app}\{#TrayExe}"; Parameters: "--installed"; Description: "Start WinDroidFS now"; Flags: postinstall nowait runasoriginaluser; Check: not WizardSilent
+; An update from the tray runs setup silently (see src/updater.rs): start the tray again, without the first-run popup.
+Filename: "{app}\{#TrayExe}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallRun]
 ; Close the tray app first, so its files can be deleted. Ending the process also ends its

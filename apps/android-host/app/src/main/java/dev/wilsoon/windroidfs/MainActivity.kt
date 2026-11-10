@@ -3,6 +3,7 @@ package dev.wilsoon.windroidfs
 import android.Manifest
 import android.app.KeyguardManager
 import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -47,6 +48,14 @@ enum class AppScreen {
 }
 
 private const val ACTION_USB_PERMISSION = "dev.wilsoon.windroidfs.USB_PERMISSION"
+private const val RELEASES_URL = "https://github.com/Wilsoon7721/WinDroidFS/releases/latest"
+/** App stores that carry WinDroidFS (F-Droid's repo, IzzyOnDroid's), best first: F-Droid, F-Droid Basic, Droid-ify, Neo Store. */
+private val F_DROID_CLIENTS = listOf(
+    "org.fdroid.fdroid",
+    "org.fdroid.basic",
+    "com.looker.droidify",
+    "com.machiav3lli.fdroid",
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -192,6 +201,7 @@ class MainActivity : ComponentActivity() {
             AppSettings.save(this, changed)
         }
         val linkStatus by LinkState.status.collectAsState()
+        val updateNeeded by LinkState.updateNeeded.collectAsState()
         val wifi by WifiState.info.collectAsState()
         val pairing by CodePairing.state.collectAsState()
 
@@ -207,6 +217,19 @@ class MainActivity : ComponentActivity() {
         val markWelcomeSeen = {
             welcomeSeen = true
             AppSettings.markWelcomeSeen(this)
+        }
+
+        // A PC said this app is out of date: that comes first, wherever the app was.
+        updateNeeded?.let { update ->
+            OutdatedScreen(
+                required = update.required,
+                currentVersion = appVersionName(),
+                latestVersion = update.latestVersion,
+                pcName = update.pcName,
+                onUpdate = { openUpdate() },
+                onClose = { LinkState.dismissUpdate() },
+            )
+            return
         }
 
         when (currentScreen) {
@@ -320,6 +343,35 @@ class MainActivity : ComponentActivity() {
                 val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
                 startActivity(intent)
             }
+        }
+    }
+
+    private fun appVersionName(): String =
+        packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+
+    /**
+     * Open this app's page where it can actually be updated: the store that installed it, else an F-Droid client, else
+     * the GitHub releases page. Not just any market:// handler: Google Play and phone makers' stores (Galaxy Store, ...)
+     * claim every market:// link but don't carry this app, and show "not found". This app never installs updates itself:
+     * stores sign their own builds, so an APK from elsewhere couldn't replace theirs anyway.
+     */
+    private fun openUpdate() {
+        val store = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
+        val handlers = packageManager.queryIntentActivities(store, 0).map { it.activityInfo.packageName }.toSet()
+        val installer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { packageManager.getInstallSourceInfo(packageName).installingPackageName }.getOrNull()
+        } else {
+            @Suppress("DEPRECATION")
+            runCatching { packageManager.getInstallerPackageName(packageName) }.getOrNull()
+        }
+        // The store that installed it carries it. Otherwise, a store known to (IzzyOnDroid is a repo in these clients).
+        val chosen = installer?.takeIf { it in handlers } ?: F_DROID_CLIENTS.firstOrNull { it in handlers }
+        val intent = chosen?.let { Intent(store).setPackage(it) }
+            ?: Intent(Intent.ACTION_VIEW, Uri.parse(RELEASES_URL))
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(RELEASES_URL)))
         }
     }
 

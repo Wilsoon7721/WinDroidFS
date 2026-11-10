@@ -20,6 +20,12 @@ pub struct Settings {
     pub use_webdav: bool,
     /// Keep a log file (see `windroidfs::logging`).
     pub log: bool,
+    /// Look for a newer PC app on GitHub now and then (see `updates`). Checking from the menu works either way.
+    pub check_for_updates: bool,
+    /// The newest PC app version an automatic check already offered, so it's offered once, not at every start.
+    pub update_offered: String,
+    /// The phone app version code already said to be out of date on this PC, so it's said once per version.
+    pub phone_update_noted: u32,
 }
 
 impl Default for Settings {
@@ -33,6 +39,9 @@ impl Default for Settings {
             hide_dotfiles: true,
             use_webdav: false,
             log: true,
+            check_for_updates: true,
+            update_offered: String::new(),
+            phone_update_noted: 0,
         }
     }
 }
@@ -78,6 +87,13 @@ impl Settings {
                 "hide_dotfiles" => settings.hide_dotfiles = flag(settings.hide_dotfiles),
                 "use_webdav" => settings.use_webdav = flag(settings.use_webdav),
                 "log" => settings.log = flag(settings.log),
+                "check_for_updates" => {
+                    settings.check_for_updates = flag(settings.check_for_updates)
+                }
+                "update_offered" => settings.update_offered = value.to_string(),
+                "phone_update_noted" => {
+                    settings.phone_update_noted = value.parse().unwrap_or_default()
+                }
                 _ => {}
             }
         }
@@ -97,13 +113,16 @@ impl Settings {
             LinkChoice::Wifi => "wifi",
         };
         format!(
-            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\n",
+            "enabled={}\ndrive={drive}\nconnect_over={link}\nopen_on_mount={}\nread_only={}\nhide_dotfiles={}\nuse_webdav={}\nlog={}\ncheck_for_updates={}\nupdate_offered={}\nphone_update_noted={}\n",
             self.enabled,
             self.open_on_mount,
             self.read_only,
             self.hide_dotfiles,
             self.use_webdav,
             self.log,
+            self.check_for_updates,
+            self.update_offered,
+            self.phone_update_noted,
         )
     }
 }
@@ -156,6 +175,9 @@ mod tests {
                 hide_dotfiles: false,
                 use_webdav: true,
                 log: false,
+                check_for_updates: false,
+                update_offered: "1.2.0".into(),
+                phone_update_noted: 2,
             },
         ] {
             assert_eq!(Settings::parse(&settings.to_text()), settings);
@@ -183,5 +205,6 @@ mod tests {
         let settings = Settings::parse("enabled=false\ndrive=auto\n");
         assert!(!settings.enabled);
         assert!(settings.open_on_mount && settings.hide_dotfiles && settings.log);
+        assert!(settings.check_for_updates);
     }
 }

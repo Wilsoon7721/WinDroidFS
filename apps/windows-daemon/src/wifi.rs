@@ -12,7 +12,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 use sha2::{Digest, Sha256};
 
-pub type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+use crate::socket::Guarded;
+
+pub type TlsStream = StreamOwned<ClientConnection, Guarded>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IDENTITY_KEY: &str = "wifi-identity.key";
@@ -281,7 +283,7 @@ pub(crate) fn connect_to(
     while conn.is_handshaking() {
         conn.complete_io(&mut sock)?;
     }
-    Ok(StreamOwned::new(conn, sock))
+    Ok(StreamOwned::new(conn, Guarded::new(sock)))
 }
 
 /// Trusts one certificate, the one swapped when pairing, and nothing else. No CA, no names.

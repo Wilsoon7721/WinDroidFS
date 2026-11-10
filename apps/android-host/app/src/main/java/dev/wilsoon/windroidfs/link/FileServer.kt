@@ -37,6 +37,9 @@ data class WriteProgress(val fileName: String, val bytesDone: Long, val bytesTot
 class FileServer(
     root: File = Environment.getExternalStorageDirectory(),
     private val deviceName: String = "",
+    /** This app's versionCode and versionName, sent in every pong: the PC decides from the code whether it's out of date. */
+    private val appVersionCode: Int = 0,
+    private val appVersionName: String = "",
     /** Top-level folders the PC may see, lowercase, or null for all. Asked on every request, so a change applies at once. */
     private val exposedFolders: () -> Set<String>? = { null },
     /** True until the owner confirms with a fingerprint. Only pings, volume and goodbye are answered meanwhile. */
@@ -76,7 +79,9 @@ class FileServer(
                     Pong.newBuilder().setTimestampMs(request.ping.timestampMs)
                         .setDeviceName(deviceName)
                         .setLocked(locked())
-                        .setLimitedFolders(exposedFolders() != null),
+                        .setLimitedFolders(exposedFolders() != null)
+                        .setAppVersionCode(appVersionCode)
+                        .setAppVersionName(appVersionName),
                 )
 
             request.hasDirRequest() -> reply.setDirResponse(listDirectory(request.dirRequest.path))

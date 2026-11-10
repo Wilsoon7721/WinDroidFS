@@ -1,27 +1,16 @@
-//! WinDroidFS privileged driver service.
-//!
-//! This is the ONLY part of WinDroidFS that changes USB drivers. It runs as SYSTEM, installed
-//! once by the installer, and the user-level daemon asks it to act over a locked-down named pipe
-//! (see `windroidfs::ipc`). Keeping driver changes here means the everyday daemon needs no
-//! elevation and the user sees no per-session UAC prompt.
-//!
-//! Policy enforced here (the reason this is safe to expose over a pipe):
-//!   - Only Android VID:PIDs are ever touched. A BeginSwap must be a normal-mode Android
-//!     identity; an EnsureWinusb must be an accessory identity. Anything else is refused.
-//!   - It only switches between driver packages already installed. It never creates or signs
-//!     packages (the driver module has no such capability), and never touches non-USB devices.
-//!
-//! Usage:
-//!   windroidfs-service run        Run the pipe loop in the foreground (dev / debugging).
-//!   windroidfs-service install    Register the Windows service (needs admin).
-//!   windroidfs-service uninstall  Restore drivers, then remove the service (needs admin).
-//!   windroidfs-service start|stop Start/stop the installed service (needs admin).
-//!   windroidfs-service            (no args) Entry point used by the service manager.
+//! WinDroidFS privileged driver service
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{
+    INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 use windroidfs::android::{ANDROID_VIDS, is_aoa_identity, is_normal_android_identity};
 use windroidfs::driver::{self, WinUsbSwap, parse_parent_instance_id};
+use windroidfs::global_drive;
 use windroidfs::ipc::transport::{Connection, accept_one};
 use windroidfs::ipc::{Request, Response};
 
@@ -65,12 +54,25 @@ fn report(result: Result<String, String>) {
 #[derive(Default)]
 struct ServiceState {
     active_swap: Option<WinUsbSwap>,
+    published: Published,
 }
 
+type Published = Arc<Mutex<HashMap<char, (String, u32)>>>;
+
 impl ServiceState {
-    fn handle(&mut self, request: Request) -> Response {
+    fn handle(&mut self, request: Request, connection: &Connection) -> Response {
         match request {
             Request::Ping => Response::Pong,
+
+            Request::PublishDrive { letter } => match self.publish(letter, connection) {
+                Ok(detail) => Response::Ok { detail },
+                Err(message) => Response::Err { message },
+            },
+
+            Request::UnpublishDrive { letter } => match self.unpublish(letter, connection) {
+                Ok(detail) => Response::Ok { detail },
+                Err(message) => Response::Err { message },
+            },
 
             Request::BeginSwap { instance_id } => {
                 if let Err(message) = require_identity(&instance_id, Identity::Normal) {
@@ -154,6 +156,101 @@ impl ServiceState {
     }
 }
 
+impl ServiceState {
+    fn publish(&mut self, letter: char, connection: &Connection) -> Result<String, String> {
+        sweep(&self.published);
+        let target = connection
+            .as_client(|| global_drive::target_of(letter))
+            .map_err(|e| format!("couldn't check the caller's drives: {e}"))?
+            .filter(|target| global_drive::is_volume_device(target))
+            .ok_or_else(|| format!("{letter}: isn't a drive the caller mounted"))?;
+        if global_drive::filesystem_name(&target).as_deref() != Some(global_drive::FILESYSTEM_NAME)
+        {
+            return Err(format!("{letter}: isn't a WinDroidFS drive"));
+        }
+        let pid = connection
+            .client_pid()
+            .map_err(|e| format!("couldn't identify the caller: {e}"))?;
+
+        let mut published = lock(&self.published);
+        if published.get(&letter).is_some_and(|(t, _)| *t == target) {
+            return Ok(format!("{letter}: is already visible to elevated programs"));
+        }
+        // As SYSTEM, a drive letter lookup sees only the global namespace.
+        if let Some(existing) = global_drive::target_of(letter) {
+            return Err(format!("{letter}: is already in use globally ({existing})"));
+        }
+        global_drive::define(letter, &target)
+            .map_err(|e| format!("couldn't define {letter}: globally: {e}"))?;
+        published.insert(letter, (target.clone(), pid));
+        drop(published);
+
+        take_back_when_gone(self.published.clone(), letter, target, pid);
+        Ok(format!("{letter}: is now visible to elevated programs"))
+    }
+
+    fn unpublish(&mut self, letter: char, connection: &Connection) -> Result<String, String> {
+        sweep(&self.published);
+        let pid = connection
+            .client_pid()
+            .map_err(|e| format!("couldn't identify the caller: {e}"))?;
+        let mut published = lock(&self.published);
+        match published.get(&letter) {
+            None => Ok(format!("{letter}: wasn't published")),
+            Some((_, owner)) if *owner != pid => {
+                Err(format!("{letter}: was published for another process"))
+            }
+            Some((target, _)) => {
+                let result = global_drive::remove(letter, target);
+                published.remove(&letter);
+                result
+                    .map(|()| format!("{letter}: is no longer visible to elevated programs"))
+                    .map_err(|e| format!("couldn't remove {letter}: globally: {e}"))
+            }
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn sweep(published: &Published) {
+    lock(published).retain(|&letter, (target, _)| {
+        let mounted =
+            global_drive::filesystem_name(target).as_deref() == Some(global_drive::FILESYSTEM_NAME);
+        if !mounted {
+            let _ = global_drive::remove(letter, target);
+            log(&format!("took back {letter}: (its drive is gone)"));
+        }
+        mounted
+    });
+}
+
+fn take_back_all(published: &Published) {
+    for (letter, (target, _)) in lock(published).drain() {
+        let _ = global_drive::remove(letter, &target);
+    }
+}
+
+fn take_back_when_gone(published: Published, letter: char, target: String, pid: u32) {
+    std::thread::spawn(move || {
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if !process.is_null() {
+            unsafe {
+                WaitForSingleObject(process, INFINITE);
+                CloseHandle(process);
+            }
+        }
+        let mut published = lock(&published);
+        if published.get(&letter) == Some(&(target.clone(), pid)) {
+            let _ = global_drive::remove(letter, &target);
+            published.remove(&letter);
+            log(&format!("took back {letter}: (its process exited)"));
+        }
+    });
+}
+
 enum Identity {
     Normal,
     Accessory,
@@ -208,7 +305,7 @@ fn serve(mut should_stop: impl FnMut() -> bool) {
 
         match connection.read_request() {
             Ok(request) => {
-                let response = state.handle(request);
+                let response = state.handle(request, &connection);
                 if let Response::Err { message } = &response {
                     log(&format!("request failed: {message}"));
                 }
@@ -222,8 +319,7 @@ fn serve(mut should_stop: impl FnMut() -> bool) {
         }
     }
 
-    // Dropping `state` here rolls back any swap still open (its `WinUsbSwap` guard), so stopping
-    // the service never leaves a phone stranded on WinUSB.
+    take_back_all(&state.published);
 }
 
 fn run_foreground() {
@@ -366,6 +462,7 @@ mod manage {
         ServiceType,
     };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    use windows_sys::Win32::Foundation::ERROR_SERVICE_EXISTS;
 
     use super::{SERVICE_DISPLAY, SERVICE_NAME, report_restore};
 
@@ -392,14 +489,25 @@ mod manage {
             account_password: None,
         };
 
-        let service = manager
-            .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
-            .map_err(|e| e.to_string())?;
+        let access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START;
+        let (service, verb) = match manager.create_service(&info, access) {
+            Ok(service) => (service, "Installed"),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_SERVICE_EXISTS as i32) =>
+            {
+                let service = manager
+                    .open_service(SERVICE_NAME, access)
+                    .map_err(|e| e.to_string())?;
+                service.change_config(&info).map_err(|e| e.to_string())?;
+                (service, "Updated")
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         let _ = service.set_description(
             "Switches Android USB drivers to WinUSB for WinDroidFS and restores them afterwards.",
         );
         service.start::<&str>(&[]).map_err(|e| e.to_string())?;
-        Ok(format!("Installed and started {SERVICE_DISPLAY}."))
+        Ok(format!("{verb} and started {SERVICE_DISPLAY}."))
     }
 
     pub fn uninstall() -> Result<String, String> {
