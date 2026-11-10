@@ -66,6 +66,12 @@ android {
     buildFeatures {
         compose = true
     }
+    // Keep AGP from adding a Google-encrypted dependency list to the APK signing block,
+    // which F-Droid and IzzyOnDroid flag because no one else can read it.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
     testOptions {
         // Lets plain JVM tests run code that touches android.* (FileServer checks
         // Build.VERSION): the stubs return 0/null instead of throwing "not mocked".
